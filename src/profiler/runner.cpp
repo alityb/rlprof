@@ -20,6 +20,7 @@
 #include <thread>
 
 #include <sqlite3.h>
+#include <errno.h>
 #include <sys/types.h>
 
 #include "rlprof/clock_control.h"
@@ -111,8 +112,20 @@ void stop_process(pid_t pid) {
   }
 }
 
+bool process_alive(pid_t pid) {
+  if (pid <= 0) {
+    return false;
+  }
+  const int rc = kill(pid, 0);
+  if (rc == 0) {
+    return true;
+  }
+  return errno != ESRCH;
+}
+
 bool server_ready(const std::string& server_url) {
-  const std::string command = "curl -fsS " + server_url + "/metrics > /dev/null";
+  const std::string command =
+      "curl -fsS " + server_url + "/metrics > /dev/null 2>&1";
   return std::system(command.c_str()) == 0;
 }
 
@@ -121,6 +134,39 @@ std::string trim(std::string value) {
     value.pop_back();
   }
   return value;
+}
+
+std::string server_log_tail(std::size_t max_lines = 120) {
+  std::ifstream stream("/tmp/rlprof_server.log");
+  if (!stream.good()) {
+    return "";
+  }
+
+  std::vector<std::string> lines;
+  std::string line;
+  while (std::getline(stream, line)) {
+    lines.push_back(line);
+  }
+
+  if (lines.empty()) {
+    return "";
+  }
+
+  const std::size_t start =
+      lines.size() > max_lines ? lines.size() - max_lines : 0;
+  std::ostringstream tail;
+  for (std::size_t i = start; i < lines.size(); ++i) {
+    tail << lines[i] << "\n";
+  }
+  return trim(tail.str());
+}
+
+std::runtime_error server_startup_error(const std::string& message) {
+  const std::string tail = server_log_tail();
+  if (tail.empty()) {
+    return std::runtime_error(message);
+  }
+  return std::runtime_error(message + "\n\nvLLM log tail:\n" + tail);
 }
 
 std::vector<std::string> split_csv_line(const std::string& line) {
@@ -423,6 +469,9 @@ ProfileRunResult run_profile(const ProfileConfig& config, ProgressCallback progr
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(config.startup_timeout_s);
     bool ready = false;
     while (std::chrono::steady_clock::now() < deadline) {
+      if (!process_alive(server_pid)) {
+        throw server_startup_error("vLLM server exited before becoming ready");
+      }
       if (server_ready(server_url)) {
         ready = true;
         break;
@@ -431,7 +480,7 @@ ProfileRunResult run_profile(const ProfileConfig& config, ProgressCallback progr
     }
     if (!ready) {
       stop_process(server_pid);
-      throw std::runtime_error(
+      throw server_startup_error(
           "vLLM server did not become ready within " +
           std::to_string(config.startup_timeout_s) + " seconds");
     }
