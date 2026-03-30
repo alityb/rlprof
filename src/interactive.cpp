@@ -205,11 +205,10 @@ std::optional<int> prompt_choice(
 
   const int n = static_cast<int>(options.size());
   int selected = std::clamp(default_index, 0, n - 1);
-  const int menu_lines = n + 1; // label line + one per option
 
   const auto render = [&]() {
     std::cout << "  " << CYAN << "? " << RESET << BOLD << label << RESET
-              << "  " << DIM << "(↑↓ navigate  enter select  q cancel)" << RESET << "\n";
+              << "  " << DIM << "(↑↓ · enter · q)" << RESET << "\n";
     for (int i = 0; i < n; ++i) {
       if (i == selected) {
         std::cout << "  " << CYAN << "> " << RESET
@@ -222,6 +221,7 @@ std::optional<int> prompt_choice(
   };
 
   std::cout << "\033[?25l"; // hide cursor
+  std::cout << "\033[s";    // save cursor position
   render();
 
   std::optional<int> result;
@@ -247,8 +247,8 @@ std::optional<int> prompt_choice(
           selected = (selected + 1) % n;     // down
         }
       }
-      // Move cursor back to top of menu and re-render.
-      std::cout << "\033[" << menu_lines << "A";
+      // Restore saved cursor position, clear to end of screen, re-render.
+      std::cout << "\033[u\033[J";
       render();
     }
   }
@@ -256,8 +256,8 @@ std::optional<int> prompt_choice(
   std::cout << "\033[?25h"; // show cursor
   tcsetattr(STDIN_FILENO, TCSANOW, &saved_termios);
 
-  // Replace menu lines with a compact confirmation or clear them.
-  std::cout << "\033[" << menu_lines << "A\033[J";
+  // Restore to where the menu started, clear it, then show compact result.
+  std::cout << "\033[u\033[J";
   if (result.has_value()) {
     std::cout << "  " << CYAN << "✓ " << RESET << BOLD << label << RESET
               << "  " << DIM << options[static_cast<std::size_t>(*result)] << RESET << "\n";
