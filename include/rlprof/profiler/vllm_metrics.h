@@ -1,0 +1,25 @@
+#pragma once
+
+#include <atomic>
+#include <chrono>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "rlprof/report.h"
+#include "rlprof/store.h"
+
+namespace rlprof::profiler {
+
+std::unordered_map<std::string, double> parse_metrics_text(const std::string& text);
+
+std::vector<MetricSummary> summarize_samples(const std::vector<MetricSample>& samples);
+
+std::vector<MetricSample> fetch_metrics_once(const std::string& server_url);
+
+std::vector<MetricSample> poll_metrics(
+    const std::string& server_url,
+    std::chrono::milliseconds interval,
+    const std::atomic<bool>& stop_flag);
+
+}  // namespace rlprof::profiler
