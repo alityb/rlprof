@@ -12,6 +12,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include <sys/ioctl.h>
+#include <unistd.h>
+
 namespace rlprof {
 namespace {
 
@@ -19,14 +22,27 @@ constexpr double kCategoryWarnRatio = 1.10;
 constexpr double kMetricWarnRatio = 1.10;
 constexpr double kTotalWarnRatio = 1.05;
 
-std::string repeat(char ch, std::size_t count) {
-  return std::string(count, ch);
-}
-
 std::string format_fixed(double value, int precision) {
   std::ostringstream stream;
   stream << std::fixed << std::setprecision(precision) << value;
   return stream.str();
+}
+
+std::string rule(int width) {
+  std::string result;
+  result.reserve(static_cast<std::size_t>(width) * 3);
+  for (int i = 0; i < width; ++i) {
+    result += "\xe2\x94\x80";  // ─
+  }
+  return result;
+}
+
+int detect_terminal_width() {
+  struct winsize ws{};
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
+    return std::max(static_cast<int>(ws.ws_col), 80);
+  }
+  return 80;
 }
 
 double population_stddev(const std::vector<double>& values, double mean) {
@@ -82,22 +98,6 @@ std::optional<double> find_metric_value(
     return use_peak ? summary.peak : summary.avg;
   }
   return std::nullopt;
-}
-
-void append_row(
-    std::ostringstream& output,
-    const std::vector<std::pair<std::string, std::size_t>>& columns,
-    const std::vector<std::string>& values) {
-  for (std::size_t i = 0; i < columns.size(); ++i) {
-    const bool left_align = (i == 0 || i + 1 == columns.size());
-    output << std::setw(static_cast<int>(columns[i].second))
-           << (left_align ? std::left : std::right)
-           << values[i];
-    if (i + 1 < columns.size()) {
-      output << "  ";
-    }
-  }
-  output << '\n';
 }
 
 }  // namespace
@@ -188,38 +188,57 @@ StabilityReport compute_stability_report(const std::vector<ProfileData>& profile
   return report;
 }
 
-std::string render_stability_report(const StabilityReport& report) {
+std::string render_stability_report(const StabilityReport& report, bool color) {
   if (report.run_count == 0) {
     return {};
   }
 
+  const char* RST = color ? "\033[0m" : "";
+  const char* BLD = color ? "\033[1m" : "";
+  const char* DIM = color ? "\033[2m" : "";
+  const char* GRN = color ? "\033[32m" : "";
+  const char* YLW = color ? "\033[33m" : "";
+  const char* CYN = color ? "\033[36m" : "";
+
+  const int term_width = color ? detect_terminal_width() : 80;
+  const std::string title = "STABILITY REPORT (" + std::to_string(report.run_count) + " runs)";
+
   std::ostringstream output;
-  output << "STABILITY REPORT (" << report.run_count << " runs)\n";
-  const std::vector<std::pair<std::string, std::size_t>> columns = {
-      {"label", 28},
-      {"mean", 10},
-      {"min", 10},
-      {"max", 10},
-      {"max/min", 10},
-      {"CV%", 8},
-      {"status", 6},
-  };
-  append_row(output, columns, {"label", "mean", "min", "max", "max/min", "CV%", "status"});
-  output << repeat('-', 94) << '\n';
+  output << BLD << CYN << "\xe2\x94\x80\xe2\x94\x80 " << title << " "
+         << RST << DIM << rule(term_width - static_cast<int>(title.size()) - 4)
+         << RST << "\n";
+
+  // Column headers (dim chrome)
+  output << DIM
+         << "  " << std::left << std::setw(24) << "label"
+         << std::right << std::setw(10) << "mean"
+         << std::setw(10) << "min"
+         << std::setw(10) << "max"
+         << std::setw(10) << "max/min"
+         << std::setw(8) << "CV%"
+         << "  status"
+         << RST << "\n";
+  output << "  " << DIM << rule(term_width - 4) << RST << '\n';
 
   const auto append_stability_row = [&](const StabilityRow& row, int precision) {
-    append_row(
-        output,
-        columns,
-        {
-            row.label,
-            format_fixed(row.mean, precision),
-            format_fixed(row.min, precision),
-            format_fixed(row.max, precision),
-            row.max_min_ratio.has_value() ? format_fixed(*row.max_min_ratio, 3) : "-",
-            format_fixed(row.cv_pct, 1) + "%",
-            row.pass ? "PASS" : "WARN",
-        });
+    const char* status_color = row.pass ? GRN : YLW;
+
+    output << "  " << std::left << std::setw(24) << row.label
+           << std::right << std::setw(10) << format_fixed(row.mean, precision)
+           << std::setw(10) << format_fixed(row.min, precision)
+           << std::setw(10) << format_fixed(row.max, precision)
+           << std::setw(10)
+           << (row.max_min_ratio.has_value() ? format_fixed(*row.max_min_ratio, 3) : "-");
+
+    // CV% — highlight if not passing
+    if (!row.pass) output << YLW;
+    output << std::setw(7) << format_fixed(row.cv_pct, 1) << "%";
+    if (!row.pass) output << RST;
+
+    // Status badge
+    output << "  " << status_color << BLD
+           << (row.pass ? "PASS" : "WARN")
+           << RST << "\n";
   };
 
   append_stability_row(report.total_kernel_time, 1);

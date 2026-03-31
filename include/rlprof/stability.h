@@ -28,6 +28,6 @@ struct StabilityReport {
 
 StabilityReport compute_stability_report(const std::vector<ProfileData>& profiles);
 
-std::string render_stability_report(const StabilityReport& report);
+std::string render_stability_report(const StabilityReport& report, bool color = false);
 
 }  // namespace rlprof

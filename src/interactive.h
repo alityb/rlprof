@@ -9,6 +9,8 @@ namespace rlprof::interactive {
 
 struct ProfileConfig {
   std::string model;
+  std::string target;
+  std::string target_workdir;
   int prompts = 64;
   int rollouts = 4;
   int min_tokens = 256;
@@ -25,6 +27,8 @@ struct ProfileConfig {
 
 struct BenchConfig {
   std::string kernel = "silu_and_mul";
+  std::string target;
+  std::string target_workdir;
   std::string shapes = "64x4096,256x4096";
   std::string dtype = "bf16";
   int warmup = 20;

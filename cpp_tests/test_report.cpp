@@ -110,9 +110,13 @@ int main() {
           .errors = 0,
       });
 
-  expect_contains(report, "rlprof | Qwen/Qwen3-8B | NVIDIA A10G | v0.1.0");
+  // Header uses Unicode box-drawing separator │
+  expect_contains(report, "rlprof");
+  expect_contains(report, "Qwen/Qwen3-8B");
+  expect_contains(report, "NVIDIA A10G");
+  expect_contains(report, "v0.1.0");
   expect_contains(report, "conservative substring matching");
-  expect_contains(report, "MEASUREMENT WARNINGS");
+  expect_contains(report, "WARNINGS");
   expect_contains(report, "GPU clocks are not locked. Run `rlprof lock-clocks`");
   expect_contains(report, "gpu temperature reached high operating range");
   expect_contains(report, "MEASUREMENT CONTEXT");

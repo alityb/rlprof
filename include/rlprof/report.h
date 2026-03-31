@@ -41,6 +41,7 @@ std::string render_report(
     const std::map<std::string, std::string>& metadata,
     const std::vector<profiler::KernelRecord>& kernels,
     const std::vector<MetricSummary>& metrics_summary,
-    const TrafficStats& traffic_stats);
+    const TrafficStats& traffic_stats,
+    bool color = false);
 
 }  // namespace rlprof

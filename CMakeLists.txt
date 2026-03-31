@@ -15,11 +15,18 @@ add_library(
   src/bench/kernels/silu_mul.cpp
   src/bench/registry.cpp
   src/bench/runner.cpp
+  src/aggregate.cpp
+  src/artifacts.cpp
   src/clock_control.cpp
   src/diff.cpp
+  src/doctor.cpp
   src/export.cpp
+  src/ops.cpp
+  src/remote.cpp
   src/stability.cpp
+  src/targets.cpp
   src/traffic.cpp
+  src/validate.cpp
   src/profiler/categorizer.cpp
   src/profiler/parser.cpp
   src/profiler/runner.cpp
@@ -137,6 +144,48 @@ if(BUILD_TESTING)
   )
   target_link_libraries(test_export PRIVATE rlprof_core)
   add_test(NAME test_export COMMAND test_export)
+
+  add_executable(
+    test_aggregate
+    cpp_tests/test_aggregate.cpp
+  )
+  target_link_libraries(test_aggregate PRIVATE rlprof_core)
+  add_test(NAME test_aggregate COMMAND test_aggregate)
+
+  add_executable(
+    test_artifacts
+    cpp_tests/test_artifacts.cpp
+  )
+  target_link_libraries(test_artifacts PRIVATE rlprof_core)
+  add_test(NAME test_artifacts COMMAND test_artifacts)
+
+  add_executable(
+    test_doctor
+    cpp_tests/test_doctor.cpp
+  )
+  target_link_libraries(test_doctor PRIVATE rlprof_core)
+  add_test(NAME test_doctor COMMAND test_doctor)
+
+  add_executable(
+    test_validate
+    cpp_tests/test_validate.cpp
+  )
+  target_link_libraries(test_validate PRIVATE rlprof_core)
+  add_test(NAME test_validate COMMAND test_validate)
+
+  add_executable(
+    test_remote
+    cpp_tests/test_remote.cpp
+  )
+  target_link_libraries(test_remote PRIVATE rlprof_core)
+  add_test(NAME test_remote COMMAND test_remote)
+
+  add_executable(
+    test_targets
+    cpp_tests/test_targets.cpp
+  )
+  target_link_libraries(test_targets PRIVATE rlprof_core)
+  add_test(NAME test_targets COMMAND test_targets)
 
   add_executable(
     test_interactive

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <iomanip>
 #include <map>
 #include <limits>
@@ -14,16 +15,86 @@
 #include <utility>
 #include <vector>
 
+#include <sys/ioctl.h>
+#include <unistd.h>
+
 namespace rlprof {
 namespace {
+
+// ── Layout constants ──
+
+constexpr int kMinWidth = 80;
+constexpr int kDefaultWidth = 80;
+constexpr int kMinBarWidth = 12;
+constexpr int kMaxBarWidth = 40;
+constexpr int kCategoryTableFixedCols = 56;  // category(16) + time(9) + %(6) + calls(7) + avg(9) + gaps(9)
+
+int detect_terminal_width() {
+  struct winsize ws{};
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
+    return std::max(static_cast<int>(ws.ws_col), kMinWidth);
+  }
+  return kDefaultWidth;
+}
 
 struct CategorySummary {
   std::int64_t total_ns = 0;
   std::int64_t calls = 0;
 };
 
-std::string repeat(char ch, std::size_t count) {
-  return std::string(count, ch);
+struct Colors {
+  const char* reset;
+  const char* bold;
+  const char* dim;
+  const char* red;
+  const char* green;
+  const char* yellow;
+  const char* cyan;
+  const char* white;
+};
+
+Colors make_colors(bool enabled) {
+  if (!enabled) {
+    return {"", "", "", "", "", "", "", ""};
+  }
+  return {
+      "\033[0m",   // reset
+      "\033[1m",   // bold
+      "\033[2m",   // dim
+      "\033[31m",  // red
+      "\033[32m",  // green
+      "\033[33m",  // yellow
+      "\033[36m",  // cyan
+      "\033[37m",  // white
+  };
+}
+
+// ── Formatting helpers ──
+
+std::string rule(int width) {
+  std::string result;
+  result.reserve(static_cast<std::size_t>(width) * 3);
+  for (int i = 0; i < width; ++i) {
+    result += "\xe2\x94\x80";  // ─
+  }
+  return result;
+}
+
+std::string heavy_rule(int width) {
+  std::string result;
+  result.reserve(static_cast<std::size_t>(width) * 3);
+  for (int i = 0; i < width; ++i) {
+    result += "\xe2\x95\x90";  // ═
+  }
+  return result;
+}
+
+std::string section_header(const Colors& c, const std::string& title, int total_width) {
+  // "── TITLE ─────────" filling to total_width
+  const int title_len = static_cast<int>(title.size());
+  const int remaining = total_width - 3 - title_len - 1;  // "── " + title + " "
+  return std::string(c.bold) + c.cyan + "\xe2\x94\x80\xe2\x94\x80 " + title + " "
+         + c.reset + c.dim + rule(std::max(remaining, 4)) + c.reset + "\n";
 }
 
 std::string format_fixed(double value, int precision) {
@@ -49,6 +120,73 @@ std::string format_int(std::int64_t value) {
     }
   }
   return output.empty() ? "0" : output;
+}
+
+// ── Bar rendering with gradient ──
+
+// Returns a colored bar where each block character gets a color based on
+// its position within the bar: early blocks are green/cyan, later blocks
+// shift to yellow then red.  This creates a heat-map effect.
+std::string render_gradient_bar(const Colors& c, double percent, int max_width) {
+  const double filled = (percent / 100.0) * max_width;
+  const int full_blocks = std::min(static_cast<int>(filled), max_width);
+  const double remainder = filled - full_blocks;
+  const int total_chars = full_blocks + (remainder >= 0.5 && full_blocks < max_width ? 1 : 0);
+
+  if (total_chars == 0) return "";
+
+  std::string bar;
+  for (int i = 0; i < full_blocks; ++i) {
+    const double pos = static_cast<double>(i) / std::max(total_chars - 1, 1);
+    const char* block_color;
+    if (pos < 0.5) block_color = c.green;
+    else if (pos < 0.75) block_color = c.yellow;
+    else block_color = c.red;
+    bar += block_color;
+    bar += "\xe2\x96\x88";  // █
+  }
+  if (remainder >= 0.5 && full_blocks < max_width) {
+    const char* half_color = (total_chars <= 2) ? c.green : c.yellow;
+    bar += half_color;
+    bar += "\xe2\x96\x8c";  // ▌
+  }
+  bar += c.reset;
+  return bar;
+}
+
+// Monochrome bar (single color) for simpler contexts
+std::string render_bar(const char* color, double percent, int max_width) {
+  const double filled = (percent / 100.0) * max_width;
+  const int full_blocks = std::min(static_cast<int>(filled), max_width);
+  const double remainder = filled - full_blocks;
+  std::string bar;
+  bar += color;
+  for (int i = 0; i < full_blocks; ++i) {
+    bar += "\xe2\x96\x88";  // █
+  }
+  if (remainder >= 0.5 && full_blocks < max_width) {
+    bar += "\xe2\x96\x8c";  // ▌
+  }
+  return bar;
+}
+
+// ── Kernel name truncation ──
+// GPU kernel names share long prefixes like "void cutlass::Kernel<...>"
+// and differ at the end, so middle-truncation preserves the useful parts.
+std::string truncate_kernel_name(const std::string& name, std::size_t max_len) {
+  if (name.size() <= max_len) return name;
+  if (max_len < 8) return name.substr(0, max_len);
+  // Keep first ~40% and last ~60% to preserve the distinguishing suffix
+  const std::size_t suffix_len = (max_len - 3) * 3 / 5;  // 60% for suffix
+  const std::size_t prefix_len = max_len - 3 - suffix_len;
+  return name.substr(0, prefix_len) + "\xe2\x80\xa6" + name.substr(name.size() - suffix_len);  // …
+}
+
+const char* percent_color(const Colors& c, double percent) {
+  if (percent >= 40.0) return c.red;
+  if (percent >= 20.0) return c.yellow;
+  if (percent >= 8.0) return c.green;
+  return c.cyan;
 }
 
 std::string format_optional_metric(
@@ -129,26 +267,11 @@ std::vector<std::string> warning_messages(const std::map<std::string, std::strin
   append_if("warning_thermal_slowdown", "thermal throttling observed");
   append_if("warning_any_clock_throttle", "clock throttling reasons were active");
   append_if("warning_temp_high", "gpu temperature reached high operating range");
+  append_if("warning_no_kernel_trace", "no kernel trace was captured for this profile");
   append_if(
       "warning_gpu_clocks_unlocked",
-      "GPU clocks are not locked. Run `rlprof lock-clocks` for reproducible measurements. See: docs.nvidia.com/deploy/nvidia-smi/index.html");
+      "GPU clocks are not locked. Run `rlprof lock-clocks` for reproducible measurements.");
   return warnings;
-}
-
-void append_row(
-    std::ostringstream& output,
-    const std::vector<std::pair<std::string, std::size_t>>& columns,
-    const std::vector<std::string>& values) {
-  for (std::size_t i = 0; i < columns.size(); ++i) {
-    const bool left_align = (i == 0);
-    output << std::setw(static_cast<int>(columns[i].second))
-           << (left_align ? std::left : std::right)
-           << values[i];
-    if (i + 1 < columns.size()) {
-      output << "  ";
-    }
-  }
-  output << '\n';
 }
 
 }  // namespace
@@ -158,25 +281,51 @@ std::string render_report(
     const std::map<std::string, std::string>& metadata,
     const std::vector<profiler::KernelRecord>& kernels,
     const std::vector<MetricSummary>& metrics_summary,
-    const TrafficStats& traffic_stats) {
+    const TrafficStats& traffic_stats,
+    bool color) {
+  const Colors c = make_colors(color);
+  const int term_width = color ? detect_terminal_width() : kDefaultWidth;
+
+  // Adaptive bar width: use remaining space after fixed columns
+  const int bar_width = std::clamp(term_width - kCategoryTableFixedCols - 2, kMinBarWidth, kMaxBarWidth);
+
+  // Adaptive kernel name width
+  const int kernel_name_width = std::clamp(term_width - 40, 30, 60);
+
   std::ostringstream output;
-  output << "rlprof | " << meta.model_name << " | " << meta.gpu_name
-         << " | " << meta.vllm_version << "\n";
-  output << "workload: " << meta.prompts << " prompts, " << meta.rollouts
-         << " rollouts/prompt, " << meta.max_tokens << " max tokens\n\n";
-  output << "category buckets use conservative substring matching; raw kernel names are authoritative\n\n";
+
+  // ── Header ──────────────────────────────────────────────────────────
+  output << "\n"
+         << c.bold << c.cyan << "  rlprof" << c.reset
+         << c.dim << " \xe2\x94\x82 " << c.reset  // │
+         << meta.model_name
+         << c.dim << " \xe2\x94\x82 " << c.reset
+         << meta.gpu_name
+         << c.dim << " \xe2\x94\x82 " << c.reset
+         << meta.vllm_version << "\n"
+         << c.dim << "  workload: " << c.reset
+         << meta.prompts << " prompts, "
+         << meta.rollouts << " rollouts/prompt, "
+         << meta.max_tokens << " max tokens\n"
+         << c.dim << "  category buckets use conservative substring matching; "
+         << "raw kernel names are authoritative" << c.reset << "\n\n";
 
   const bool cluster_mode = metadata_value(metadata, "cluster_mode", "false") == "true";
 
+  // ── Warnings ────────────────────────────────────────────────────────
   const auto warnings = warning_messages(metadata);
   if (!warnings.empty()) {
-    output << "MEASUREMENT WARNINGS\n";
-    for (const auto& warning : warnings) {
-      output << "- " << warning << "\n";
+    output << c.bold << c.yellow << "  \xe2\x9a\xa0  WARNINGS" << c.reset << "\n";
+    for (std::size_t i = 0; i < warnings.size(); ++i) {
+      const bool last = (i + 1 == warnings.size());
+      output << c.dim << "  "
+             << (last ? "\xe2\x94\x94\xe2\x94\x80 " : "\xe2\x94\x9c\xe2\x94\x80 ")
+             << c.reset << c.yellow << warnings[i] << c.reset << "\n";
     }
     output << "\n";
   }
 
+  // ── Measurement context ─────────────────────────────────────────────
   const auto sm_min = metadata_double(metadata, "measurement_sm_clock_min_mhz");
   const auto sm_avg = metadata_double(metadata, "measurement_sm_clock_avg_mhz");
   const auto sm_max = metadata_double(metadata, "measurement_sm_clock_max_mhz");
@@ -190,64 +339,48 @@ std::string render_report(
   const auto power_limit = metadata_double(metadata, "measurement_power_limit_w");
 
   if (sm_avg.has_value() || temp_max.has_value()) {
-    output << "MEASUREMENT CONTEXT\n";
-    const std::vector<std::pair<std::string, std::size_t>> context_columns = {
-        {"metric", 30},
-        {"value", 24},
+    output << section_header(c, "MEASUREMENT CONTEXT", term_width);
+    // Two-column key-value layout with dim labels, normal values
+    const auto ctx_row = [&](const std::string& label, const std::string& value) {
+      output << "  " << c.dim << std::left << std::setw(30) << label << c.reset
+             << "  " << value << "\n";
     };
-    append_row(output, context_columns, {"metric", "value"});
-    output << repeat('-', 56) << '\n';
-    append_row(output, context_columns, {"driver version", metadata_value(metadata, "measurement_driver_version")});
-    append_row(output, context_columns, {"persistence mode", metadata_value(metadata, "measurement_persistence_mode")});
-    append_row(output, context_columns, {"gpu clock policy", metadata_value(metadata, "measurement_gpu_clock_policy")});
+    ctx_row("driver version", metadata_value(metadata, "measurement_driver_version"));
+    ctx_row("persistence mode", metadata_value(metadata, "measurement_persistence_mode"));
+    ctx_row("gpu clock policy", metadata_value(metadata, "measurement_gpu_clock_policy"));
     if (cluster_mode) {
-      append_row(output, context_columns, {"cluster endpoints", metadata_value(metadata, "cluster_endpoint_count")});
-      append_row(output, context_columns, {"peer endpoints", metadata_value(metadata, "cluster_peer_endpoint_count")});
-      append_row(output, context_columns, {"trace scope", metadata_value(metadata, "cluster_trace_scope")});
+      ctx_row("cluster endpoints", metadata_value(metadata, "cluster_endpoint_count"));
+      ctx_row("peer endpoints", metadata_value(metadata, "cluster_peer_endpoint_count"));
+      ctx_row("trace scope", metadata_value(metadata, "cluster_trace_scope"));
     }
     if (metadata_value(metadata, "measurement_gpu_max_sm_clock_mhz", "").size() > 0) {
-      append_row(
-          output,
-          context_columns,
-          {"max supported sm clock mhz",
-           metadata_value(metadata, "measurement_gpu_max_sm_clock_mhz")});
+      ctx_row("max supported sm clock mhz", metadata_value(metadata, "measurement_gpu_max_sm_clock_mhz"));
     }
-    append_row(output, context_columns, {"observed pstate(s)", metadata_value(metadata, "measurement_pstates")});
-    append_row(output, context_columns, {"gpu telemetry samples", metadata_value(metadata, "measurement_samples")});
+    ctx_row("observed pstate(s)", metadata_value(metadata, "measurement_pstates"));
+    ctx_row("gpu telemetry samples", metadata_value(metadata, "measurement_samples"));
     if (sm_avg.has_value()) {
-      append_row(
-          output,
-          context_columns,
-          {"sm clock (min/avg/max mhz)",
-           format_fixed(*sm_min, 0) + " / " + format_fixed(*sm_avg, 0) + " / " +
-               format_fixed(*sm_max, 0)});
+      ctx_row("sm clock (min/avg/max mhz)",
+              format_fixed(*sm_min, 0) + " / " + format_fixed(*sm_avg, 0) + " / " +
+                  format_fixed(*sm_max, 0));
     }
     if (mem_avg.has_value()) {
-      append_row(
-          output,
-          context_columns,
-          {"mem clock (min/avg/max mhz)",
-           format_fixed(*mem_min, 0) + " / " + format_fixed(*mem_avg, 0) + " / " +
-               format_fixed(*mem_max, 0)});
+      ctx_row("mem clock (min/avg/max mhz)",
+              format_fixed(*mem_min, 0) + " / " + format_fixed(*mem_avg, 0) + " / " +
+                  format_fixed(*mem_max, 0));
     }
     if (temp_max.has_value()) {
-      append_row(
-          output,
-          context_columns,
-          {"temperature (min/max c)",
-           format_fixed(*temp_min, 0) + " / " + format_fixed(*temp_max, 0)});
+      ctx_row("temperature (min/max c)",
+              format_fixed(*temp_min, 0) + " / " + format_fixed(*temp_max, 0));
     }
     if (power_avg.has_value()) {
-      append_row(
-          output,
-          context_columns,
-          {"power draw (avg/peak/limit w)",
-           format_fixed(*power_avg, 1) + " / " + format_fixed(*power_peak, 1) + " / " +
-               format_fixed(*power_limit, 1)});
+      ctx_row("power draw (avg/peak/limit w)",
+              format_fixed(*power_avg, 1) + " / " + format_fixed(*power_peak, 1) + " / " +
+                  format_fixed(*power_limit, 1));
     }
     output << '\n';
   }
 
+  // ── Kernel breakdown by category ────────────────────────────────────
   const std::int64_t total_ns = std::accumulate(
       kernels.begin(),
       kernels.end(),
@@ -271,16 +404,18 @@ std::string render_report(
         return lhs.second.total_ns > rhs.second.total_ns;
       });
 
-  output << "KERNEL BREAKDOWN BY CATEGORY\n";
-  const std::vector<std::pair<std::string, std::size_t>> category_columns = {
-      {"category", 16},
-      {"time (ms)", 9},
-      {"%", 6},
-      {"calls", 7},
-      {"avg (us)", 9},
-  };
-  append_row(output, category_columns, {"category", "time (ms)", "%", "calls", "avg (us)"});
-  output << repeat('-', 56) << '\n';
+  output << section_header(c, "KERNEL BREAKDOWN BY CATEGORY", term_width);
+
+  // Column header (dim chrome)
+  output << c.dim
+         << "  " << std::left << std::setw(16) << "category"
+         << std::right << std::setw(10) << "time (ms)"
+         << std::setw(7) << "%"
+         << std::setw(8) << "calls"
+         << std::setw(10) << "avg (us)"
+         << "  " << c.reset << "\n";
+  output << "  " << c.dim << rule(term_width - 4) << c.reset << '\n';
+
   for (const auto& [category, summary] : categories) {
     const double avg_ns =
         summary.calls == 0 ? 0.0
@@ -288,46 +423,43 @@ std::string render_report(
     const double percent =
         total_ns == 0 ? 0.0
                       : (static_cast<double>(summary.total_ns) / total_ns) * 100.0;
-    append_row(
-        output,
-        category_columns,
-        {
-            category,
-            format_fixed(summary.total_ns / 1'000'000.0, 1),
-            format_fixed(percent, 1),
-            std::to_string(summary.calls),
-            format_fixed(avg_ns / 1'000.0, 1),
-        });
-  }
-  output << repeat('-', 56) << '\n';
-  append_row(
-      output,
-      category_columns,
-      {
-          "total",
-          format_fixed(total_ns / 1'000'000.0, 1),
-          total_ns == 0 ? "0.0" : "100.0",
-          std::to_string(std::accumulate(
-              kernels.begin(),
-              kernels.end(),
-              std::int64_t{0},
-              [](std::int64_t total, const profiler::KernelRecord& record) {
-                return total + record.calls;
-              })),
-          "",
-      });
-  output << '\n';
 
-  output << "TOP 10 KERNELS BY TOTAL TIME\n";
-  const std::vector<std::pair<std::string, std::size_t>> kernel_columns = {
-      {"kernel", 40},
-      {"time (ms)", 9},
-      {"%", 6},
-      {"calls", 7},
-      {"avg (us)", 9},
-  };
-  append_row(output, kernel_columns, {"kernel", "time (ms)", "%", "calls", "avg (us)"});
-  output << repeat('-', 79) << '\n';
+    const std::string bar = render_gradient_bar(c, percent, bar_width);
+    const char* pct_color = percent_color(c, percent);
+
+    output << "  " << std::left << std::setw(16) << category
+           << std::right << std::setw(10) << format_fixed(summary.total_ns / 1'000'000.0, 1)
+           << pct_color << std::setw(6) << format_fixed(percent, 1) << "%" << c.reset
+           << std::setw(8) << summary.calls
+           << std::setw(10) << format_fixed(avg_ns / 1'000.0, 1)
+           << "  " << bar << "\n";
+  }
+
+  // Total row: double-line separator for visual distinction
+  output << "  " << c.dim << heavy_rule(term_width - 4) << c.reset << '\n';
+  output << "  " << c.bold << std::left << std::setw(16) << "total" << c.reset
+         << std::right << std::setw(10) << format_fixed(total_ns / 1'000'000.0, 1)
+         << c.bold << std::setw(6) << (total_ns == 0 ? "0.0" : "100.0") << "%" << c.reset
+         << std::setw(8) << std::accumulate(
+                kernels.begin(),
+                kernels.end(),
+                std::int64_t{0},
+                [](std::int64_t total, const profiler::KernelRecord& record) {
+                  return total + record.calls;
+                })
+         << "\n\n";
+
+  // ── Top 10 kernels ──────────────────────────────────────────────────
+  output << section_header(c, "TOP 10 KERNELS BY TOTAL TIME", term_width);
+  output << c.dim
+         << "  " << std::left << std::setw(kernel_name_width) << "kernel"
+         << std::right << std::setw(10) << "time (ms)"
+         << std::setw(7) << "%"
+         << std::setw(8) << "calls"
+         << std::setw(10) << "avg (us)"
+         << c.reset << "\n";
+  output << "  " << c.dim << rule(term_width - 4) << c.reset << '\n';
+
   std::vector<profiler::KernelRecord> sorted_kernels = kernels;
   std::sort(
       sorted_kernels.begin(),
@@ -339,19 +471,21 @@ std::string render_report(
     const profiler::KernelRecord& kernel = sorted_kernels[i];
     const double percent =
         total_ns == 0 ? 0.0 : (static_cast<double>(kernel.total_ns) / total_ns) * 100.0;
-    append_row(
-        output,
-        kernel_columns,
-        {
-            kernel.name,
-            format_fixed(kernel.total_ns / 1'000'000.0, 1),
-            format_fixed(percent, 1),
-            std::to_string(kernel.calls),
-            format_fixed(kernel.avg_ns / 1'000.0, 1),
-        });
+    const char* pct_color = percent_color(c, percent);
+    const std::string name = truncate_kernel_name(
+        kernel.name, static_cast<std::size_t>(kernel_name_width));
+
+    output << "  " << c.bold << std::left << std::setw(kernel_name_width) << name << c.reset
+           << std::right << std::setw(10)
+           << format_fixed(kernel.total_ns / 1'000'000.0, 1)
+           << pct_color << std::setw(6)
+           << format_fixed(percent, 1) << "%" << c.reset
+           << std::setw(8) << kernel.calls
+           << std::setw(10) << format_fixed(kernel.avg_ns / 1'000.0, 1) << "\n";
   }
   output << '\n';
 
+  // ── Top uncategorized kernels ───────────────────────────────────────
   std::vector<profiler::KernelRecord> uncategorized_kernels;
   for (const profiler::KernelRecord& kernel : sorted_kernels) {
     if (kernel.category == "other") {
@@ -359,84 +493,101 @@ std::string render_report(
     }
   }
   if (!uncategorized_kernels.empty()) {
-    output << "TOP UNCATEGORIZED KERNELS\n";
-    append_row(output, kernel_columns, {"kernel", "time (ms)", "%", "calls", "avg (us)"});
-    output << repeat('-', 79) << '\n';
+    output << section_header(c, "TOP UNCATEGORIZED KERNELS", term_width);
+    output << c.dim
+           << "  " << std::left << std::setw(kernel_name_width) << "kernel"
+           << std::right << std::setw(10) << "time (ms)"
+           << std::setw(7) << "%"
+           << std::setw(8) << "calls"
+           << std::setw(10) << "avg (us)"
+           << c.reset << "\n";
+    output << "  " << c.dim << rule(term_width - 4) << c.reset << '\n';
     for (std::size_t i = 0; i < uncategorized_kernels.size() && i < 10; ++i) {
       const profiler::KernelRecord& kernel = uncategorized_kernels[i];
       const double percent =
           total_ns == 0 ? 0.0 : (static_cast<double>(kernel.total_ns) / total_ns) * 100.0;
-      append_row(
-          output,
-          kernel_columns,
-          {
-              kernel.name,
-              format_fixed(kernel.total_ns / 1'000'000.0, 1),
-              format_fixed(percent, 1),
-              std::to_string(kernel.calls),
-              format_fixed(kernel.avg_ns / 1'000.0, 1),
-          });
+      const char* pct_color = percent_color(c, percent);
+      const std::string name = truncate_kernel_name(
+          kernel.name, static_cast<std::size_t>(kernel_name_width));
+
+      output << "  " << c.bold << std::left << std::setw(kernel_name_width) << name << c.reset
+             << std::right << std::setw(10)
+             << format_fixed(kernel.total_ns / 1'000'000.0, 1)
+             << pct_color << std::setw(6)
+             << format_fixed(percent, 1) << "%" << c.reset
+             << std::setw(8) << kernel.calls
+             << std::setw(10) << format_fixed(kernel.avg_ns / 1'000.0, 1) << "\n";
     }
     output << '\n';
   }
 
-  output << (cluster_mode ? "CLUSTER VLLM METRICS\n" : "VLLM SERVER METRICS\n");
-  const std::vector<std::pair<std::string, std::size_t>> metric_columns = {
-      {"metric", 30},
-      {"avg", 10},
-      {"peak", 10},
-  };
-  append_row(output, metric_columns, {"metric", "avg", "peak"});
-  output << repeat('-', 54) << '\n';
+  // ── vLLM metrics ────────────────────────────────────────────────────
+  const std::string metrics_title =
+      cluster_mode ? "CLUSTER VLLM METRICS" : "VLLM SERVER METRICS";
+  output << section_header(c, metrics_title, term_width);
+
+  output << c.dim
+         << "  " << std::left << std::setw(30) << "metric"
+         << std::right << std::setw(12) << "avg"
+         << std::setw(12) << "peak"
+         << c.reset << "\n";
+  output << "  " << c.dim << rule(54) << c.reset << '\n';
+
   for (const MetricSummary& summary : metrics_summary) {
-    append_row(
-        output,
-        metric_columns,
-        {
-            metric_label(summary.metric),
-            format_optional_metric(summary.metric, summary.avg),
-            format_optional_metric(summary.metric, summary.peak),
-        });
+    const std::string label = metric_label(summary.metric);
+    const std::string avg_val = format_optional_metric(summary.metric, summary.avg);
+    const std::string peak_val = format_optional_metric(summary.metric, summary.peak);
+
+    // Highlight preemptions >0 or cache usage >90%
+    bool highlight = false;
+    if (summary.metric == "vllm:num_preemptions_total" && summary.avg.has_value() && *summary.avg > 0) {
+      highlight = true;
+    }
+    if (summary.metric == "vllm:gpu_cache_usage_perc" && summary.peak.has_value() && *summary.peak > 0.9) {
+      highlight = true;
+    }
+
+    output << "  ";
+    if (highlight) output << c.yellow;
+    output << std::left << std::setw(30) << label
+           << std::right << std::setw(12) << avg_val
+           << std::setw(12) << peak_val;
+    if (highlight) output << c.reset;
+    output << "\n";
   }
   output << '\n';
 
-  output << "TRAFFIC SHAPE\n";
-  const std::vector<std::pair<std::string, std::size_t>> traffic_columns = {
-      {"metric", 30},
-      {"value", 12},
+  // ── Traffic shape ───────────────────────────────────────────────────
+  output << section_header(c, "TRAFFIC SHAPE", term_width);
+
+  output << c.dim
+         << "  " << std::left << std::setw(30) << "metric"
+         << std::right << std::setw(14) << "value"
+         << c.reset << "\n";
+  output << "  " << c.dim << rule(44) << c.reset << '\n';
+
+  const auto traffic_row = [&](const std::string& label, const std::string& value) {
+    output << "  " << std::left << std::setw(30) << label
+           << std::right << std::setw(14) << value << "\n";
   };
-  append_row(output, traffic_columns, {"metric", "value"});
-  output << repeat('-', 44) << '\n';
-  append_row(output, traffic_columns, {"total requests", format_int(traffic_stats.total_requests)});
-  append_row(
-      output,
-      traffic_columns,
-      {"completion length mean",
-       traffic_stats.completion_length_mean.has_value()
-           ? format_int(static_cast<std::int64_t>(std::llround(*traffic_stats.completion_length_mean)))
-           : "-"});
-  append_row(
-      output,
-      traffic_columns,
-      {"completion length p50",
-       traffic_stats.completion_length_p50.has_value()
-           ? format_int(static_cast<std::int64_t>(std::llround(*traffic_stats.completion_length_p50)))
-           : "-"});
-  append_row(
-      output,
-      traffic_columns,
-      {"completion length p99",
-       traffic_stats.completion_length_p99.has_value()
-           ? format_int(static_cast<std::int64_t>(std::llround(*traffic_stats.completion_length_p99)))
-           : "-"});
-  append_row(
-      output,
-      traffic_columns,
-      {"max/median ratio",
-       traffic_stats.max_median_ratio.has_value()
-           ? format_fixed(*traffic_stats.max_median_ratio, 2) + "x"
-           : "-"});
-  append_row(output, traffic_columns, {"errors", format_int(traffic_stats.errors)});
+  traffic_row("total requests", format_int(traffic_stats.total_requests));
+  traffic_row("completion length mean",
+              traffic_stats.completion_length_mean.has_value()
+                  ? format_int(static_cast<std::int64_t>(std::llround(*traffic_stats.completion_length_mean)))
+                  : "-");
+  traffic_row("completion length p50",
+              traffic_stats.completion_length_p50.has_value()
+                  ? format_int(static_cast<std::int64_t>(std::llround(*traffic_stats.completion_length_p50)))
+                  : "-");
+  traffic_row("completion length p99",
+              traffic_stats.completion_length_p99.has_value()
+                  ? format_int(static_cast<std::int64_t>(std::llround(*traffic_stats.completion_length_p99)))
+                  : "-");
+  traffic_row("max/median ratio",
+              traffic_stats.max_median_ratio.has_value()
+                  ? format_fixed(*traffic_stats.max_median_ratio, 2) + "x"
+                  : "-");
+  traffic_row("errors", format_int(traffic_stats.errors));
 
   return output.str();
 }

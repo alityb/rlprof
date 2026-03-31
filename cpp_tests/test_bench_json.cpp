@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <cmath>
 #include <iostream>
 #include <string>
 
@@ -42,11 +43,19 @@ int main() {
       "bandwidth_gb_s": 184.1,
       "valid": true,
       "validation_max_abs_error": 0.0,
+      "deterministic": true,
+      "determinism_max_abs_error": 0.0,
+      "timing_warning": true,
+      "environment_warning": true,
       "unstable": false
     }
   ],
-  "warnings": [
-    "silu_and_mul vllm-cuda 256x4096: clock throttle reasons were active"
+  "correctness_failures": [],
+  "timing_warnings": [
+    "silu_and_mul vllm-cuda 256x4096: repeat cv exceeded threshold (18.0%)"
+  ],
+  "environment_warnings": [
+    "silu_and_mul vllm-cuda 256x4096: power cap throttling observed"
   ]
 }
 )JSON";
@@ -58,12 +67,21 @@ int main() {
   expect_true(output.results[0].shape[0] == 256 && output.results[0].shape[1] == 4096,
               "shape mismatch");
   expect_true(std::abs(output.results[0].avg_ms - 0.034) < 1e-9, "avg_us should convert to ms");
-  expect_true(output.warnings.size() == 1, "warnings should parse");
+  expect_true(output.results[0].deterministic_passed, "deterministic field should parse");
+  expect_true(output.timing_warnings.size() == 1, "timing warnings should parse");
+  expect_true(output.environment_warnings.size() == 1, "environment warnings should parse");
 
   const std::string rendered = rlprof::bench::render_bench_output(output);
   expect_true(rendered.find("avg us") != std::string::npos, "render should use microsecond headings");
   expect_true(rendered.find("vllm-cuda") != std::string::npos, "render should contain implementation");
-  expect_true(rendered.find("MEASUREMENT WARNINGS") != std::string::npos, "render should include warnings");
+  expect_true(rendered.find("TIMING WARNINGS") != std::string::npos, "render should include timing warnings");
+  expect_true(rendered.find("ENVIRONMENT WARNINGS") != std::string::npos, "render should include environment warnings");
+
+  const std::string roundtrip = rlprof::bench::serialize_bench_output_json(output);
+  expect_true(roundtrip.find("\"timing_warnings\"") != std::string::npos,
+              "serialized output should include timing warnings");
+  expect_true(roundtrip.find("\"environment_warnings\"") != std::string::npos,
+              "serialized output should include environment warnings");
 
   return 0;
 }

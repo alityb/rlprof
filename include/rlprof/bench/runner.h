@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -25,6 +26,10 @@ struct BenchResult {
   double bandwidth_gb_s;
   bool validation_passed = true;
   double validation_max_abs_error = 0.0;
+  bool deterministic_passed = true;
+  double determinism_max_abs_error = 0.0;
+  bool has_timing_warning = false;
+  bool has_environment_warning = false;
   bool unstable = false;
 };
 
@@ -41,7 +46,9 @@ struct BenchGpuInfo {
 struct BenchRunOutput {
   std::optional<BenchGpuInfo> gpu;
   std::vector<BenchResult> results;
-  std::vector<std::string> warnings;
+  std::vector<std::string> correctness_failures;
+  std::vector<std::string> timing_warnings;
+  std::vector<std::string> environment_warnings;
 };
 
 class BenchmarkBackend {
@@ -71,6 +78,10 @@ std::vector<BenchResult> benchmark_category(
     BenchmarkBackend* backend = nullptr);
 
 BenchRunOutput parse_bench_json(const std::string& json_text);
+std::string serialize_bench_output_json(const BenchRunOutput& output);
+std::filesystem::path resolve_bench_output_path(
+    const std::string& kernel,
+    const std::string& output_spec);
 std::string render_bench_results(const std::vector<BenchResult>& results);
 std::string render_bench_output(const BenchRunOutput& output);
 

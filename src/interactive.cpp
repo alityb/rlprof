@@ -290,12 +290,15 @@ std::optional<int> prompt_choice(
 
   const int n = static_cast<int>(options.size());
   int selected = std::clamp(default_index, 0, n - 1);
+  int rendered_lines = 0;
 
   const auto render = [&]() {
+    rendered_lines = 0;
     std::cout << "  " << color_code(CYAN) << "? " << color_code(RESET)
               << color_code(BOLD) << label << color_code(RESET)
               << "  " << color_code(DIM) << "(↑↓ · enter · q)"
               << color_code(RESET) << "\n";
+    ++rendered_lines;
     for (int i = 0; i < n; ++i) {
       if (i == selected) {
         std::cout << "  " << color_code(CYAN) << "> " << color_code(RESET)
@@ -304,13 +307,13 @@ std::optional<int> prompt_choice(
         std::cout << "    " << color_code(DIM)
                   << options[static_cast<std::size_t>(i)] << color_code(RESET) << "\n";
       }
+      ++rendered_lines;
     }
     std::flush(std::cout);
   };
 
   if (use_ansi_control()) {
     std::cout << "\033[?25l";
-    std::cout << "\033[s";
   }
   render();
 
@@ -337,9 +340,11 @@ std::optional<int> prompt_choice(
           selected = (selected + 1) % n;     // down
         }
       }
-      // Restore saved cursor position, clear to end of screen, re-render.
+      // Move cursor up by the number of rendered lines, then clear below.
+      // This is more robust than save/restore cursor (DECSC/DECRC) which
+      // breaks when the option list causes the terminal to scroll.
       if (use_ansi_control()) {
-        std::cout << "\033[u\033[J";
+        std::cout << "\033[" << rendered_lines << "A\033[J";
       }
       render();
     }
@@ -350,8 +355,9 @@ std::optional<int> prompt_choice(
   }
   tcsetattr(STDIN_FILENO, TCSANOW, &saved_termios);
 
+  // Clear the selection menu and replace with confirmation line.
   if (use_ansi_control()) {
-    std::cout << "\033[u\033[J";
+    std::cout << "\033[" << rendered_lines << "A\033[J";
   }
   if (result.has_value()) {
     std::cout << "  " << color_code(CYAN) << "✓ " << color_code(RESET)
@@ -428,6 +434,8 @@ ProfileConfig load_profile_defaults() {
     return it == values.end() ? fallback : it->second;
   };
   config.model = get("profile.model");
+  config.target = get("profile.target");
+  config.target_workdir = get("profile.target_workdir");
   config.prompts = parse_int_value(values, "profile.prompts", config.prompts);
   config.rollouts = parse_int_value(values, "profile.rollouts", config.rollouts);
   config.min_tokens = parse_int_value(values, "profile.min_tokens", config.min_tokens);
@@ -459,6 +467,8 @@ BenchConfig load_bench_defaults() {
   if (!kernel.empty()) {
     config.kernel = kernel;
   }
+  config.target = get("bench.target");
+  config.target_workdir = get("bench.target_workdir");
   const std::string shapes = get("bench.shapes");
   if (!shapes.empty()) {
     config.shapes = shapes;
@@ -476,6 +486,8 @@ BenchConfig load_bench_defaults() {
 void save_profile_defaults(const ProfileConfig& config) {
   auto values = load_defaults_map();
   values["profile.model"] = config.model;
+  values["profile.target"] = config.target;
+  values["profile.target_workdir"] = config.target_workdir;
   values["profile.prompts"] = std::to_string(config.prompts);
   values["profile.rollouts"] = std::to_string(config.rollouts);
   values["profile.min_tokens"] = std::to_string(config.min_tokens);
@@ -494,6 +506,8 @@ void save_profile_defaults(const ProfileConfig& config) {
 void save_bench_defaults(const BenchConfig& config) {
   auto values = load_defaults_map();
   values["bench.kernel"] = config.kernel;
+  values["bench.target"] = config.target;
+  values["bench.target_workdir"] = config.target_workdir;
   values["bench.shapes"] = config.shapes;
   values["bench.dtype"] = config.dtype;
   values["bench.warmup"] = std::to_string(config.warmup);
@@ -529,6 +543,16 @@ std::vector<std::string> build_profile_args(const ProfileConfig& config) {
       "--repeat",
       std::to_string(config.repeat),
   };
+  const std::string target = trim(config.target);
+  if (!target.empty()) {
+    args.push_back("--target");
+    args.push_back(target);
+  }
+  const std::string target_workdir = trim(config.target_workdir);
+  if (!target_workdir.empty()) {
+    args.push_back("--target-workdir");
+    args.push_back(target_workdir);
+  }
   if (config.discard_first_run) {
     args.push_back("--discard-first-run");
   }
@@ -549,21 +573,34 @@ std::vector<std::string> build_profile_args(const ProfileConfig& config) {
 }
 
 std::vector<std::string> build_bench_args(const BenchConfig& config) {
-  return {
+  std::vector<std::string> args = {
       "bench",
       "--kernel",
       config.kernel,
-      "--shapes",
-      config.shapes,
-      "--dtype",
-      config.dtype,
-      "--warmup",
-      std::to_string(config.warmup),
-      "--n-iter",
-      std::to_string(config.n_iter),
-      "--repeats",
-      std::to_string(config.repeats),
   };
+  const std::string target = trim(config.target);
+  if (!target.empty()) {
+    args.push_back("--target");
+    args.push_back(target);
+  }
+  const std::string target_workdir = trim(config.target_workdir);
+  if (!target_workdir.empty()) {
+    args.push_back("--target-workdir");
+    args.push_back(target_workdir);
+  }
+  args.insert(
+      args.end(),
+      {"--shapes",
+       config.shapes,
+       "--dtype",
+       config.dtype,
+       "--warmup",
+       std::to_string(config.warmup),
+       "--n-iter",
+       std::to_string(config.n_iter),
+       "--repeats",
+       std::to_string(config.repeats)});
+  return args;
 }
 
 void run_with_progress(

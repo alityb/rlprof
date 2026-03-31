@@ -44,6 +44,8 @@ int main() {
 
   const auto profile_args = rlprof::interactive::build_profile_args({
       .model = "Qwen/Qwen3-8B",
+      .target = "selfboot",
+      .target_workdir = "/tmp/rlprof_bootstrap_test",
       .prompts = 64,
       .rollouts = 4,
       .min_tokens = 256,
@@ -59,6 +61,10 @@ int main() {
   });
   expect_true(!profile_args.empty() && profile_args.front() == "profile", "expected profile command");
   expect_true(contains_sequence(profile_args, {"--model", "Qwen/Qwen3-8B"}), "expected model args");
+  expect_true(contains_sequence(profile_args, {"--target", "selfboot"}), "expected target args");
+  expect_true(
+      contains_sequence(profile_args, {"--target-workdir", "/tmp/rlprof_bootstrap_test"}),
+      "expected target workdir args");
   expect_true(contains_sequence(profile_args, {"--repeat", "3"}), "expected repeat args");
   expect_true(
       contains_sequence(
@@ -71,6 +77,8 @@ int main() {
 
   const auto bench_args = rlprof::interactive::build_bench_args({
       .kernel = "silu_and_mul",
+      .target = "selfboot",
+      .target_workdir = "/tmp/rlprof_bootstrap_test",
       .shapes = "1x4096,64x4096,256x4096",
       .dtype = "bf16",
       .warmup = 20,
@@ -79,6 +87,7 @@ int main() {
   });
   expect_true(!bench_args.empty() && bench_args.front() == "bench", "expected bench command");
   expect_true(contains_sequence(bench_args, {"--kernel", "silu_and_mul"}), "expected kernel arg");
+  expect_true(contains_sequence(bench_args, {"--target", "selfboot"}), "expected bench target arg");
 
   const std::string gpu_name = rlprof::interactive::detect_gpu_name();
   expect_true(!gpu_name.empty(), "detect_gpu_name should return a non-empty string");
@@ -106,6 +115,8 @@ int main() {
 
   const rlprof::interactive::ProfileConfig saved_profile = {
       .model = "Qwen/Qwen3-8B",
+      .target = "selfboot",
+      .target_workdir = "/tmp/rlprof_bootstrap_test",
       .prompts = 32,
       .rollouts = 2,
       .min_tokens = 128,
@@ -122,6 +133,10 @@ int main() {
   rlprof::interactive::save_profile_defaults(saved_profile);
   const auto loaded_profile = rlprof::interactive::load_profile_defaults();
   expect_true(loaded_profile.model == saved_profile.model, "expected saved profile model");
+  expect_true(loaded_profile.target == saved_profile.target, "expected saved profile target");
+  expect_true(
+      loaded_profile.target_workdir == saved_profile.target_workdir,
+      "expected saved profile target workdir");
   expect_true(loaded_profile.prompts == saved_profile.prompts, "expected saved profile prompts");
   expect_true(loaded_profile.rollouts == saved_profile.rollouts, "expected saved profile rollouts");
   expect_true(loaded_profile.min_tokens == saved_profile.min_tokens, "expected saved profile min tokens");
@@ -137,6 +152,8 @@ int main() {
 
   const rlprof::interactive::BenchConfig saved_bench = {
       .kernel = "rotary_embedding",
+      .target = "selfboot",
+      .target_workdir = "/tmp/rlprof_bootstrap_test",
       .shapes = "1x1024,64x1024",
       .dtype = "fp16",
       .warmup = 11,
@@ -146,6 +163,10 @@ int main() {
   rlprof::interactive::save_bench_defaults(saved_bench);
   const auto loaded_bench = rlprof::interactive::load_bench_defaults();
   expect_true(loaded_bench.kernel == saved_bench.kernel, "expected saved bench kernel");
+  expect_true(loaded_bench.target == saved_bench.target, "expected saved bench target");
+  expect_true(
+      loaded_bench.target_workdir == saved_bench.target_workdir,
+      "expected saved bench target workdir");
   expect_true(loaded_bench.shapes == saved_bench.shapes, "expected saved bench shapes");
   expect_true(loaded_bench.dtype == saved_bench.dtype, "expected saved bench dtype");
   expect_true(loaded_bench.warmup == saved_bench.warmup, "expected saved bench warmup");

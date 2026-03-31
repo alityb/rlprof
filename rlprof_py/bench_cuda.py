@@ -29,8 +29,14 @@ class BenchResult:
     repeats: int
     validation_passed: bool
     validation_max_abs_error: float
+    deterministic_passed: bool
+    determinism_max_abs_error: float
+    has_timing_warning: bool
+    has_environment_warning: bool
     unstable: bool
-    warnings: list[str]
+    correctness_failures: list[str]
+    timing_warnings: list[str]
+    environment_warnings: list[str]
 
 
 @dataclass
@@ -151,6 +157,11 @@ def measure_once(fn, warmup: int, n_iter: int) -> list[float]:
     return times
 
 
+def prime_implementation(fn) -> None:
+    fn()
+    torch.cuda.synchronize()
+
+
 def max_abs_error(
     reference_outputs: tuple[torch.Tensor, ...],
     candidate_outputs: tuple[torch.Tensor, ...],
@@ -184,6 +195,23 @@ def validate_implementation(spec: KernelSpec, implementation, shape, dtype_name:
     return passed, max_error
 
 
+def validate_determinism(spec: KernelSpec, implementation, shape, dtype_name: str) -> tuple[bool, float]:
+    dtype = dtype_from_name(dtype_name)
+    seed_state = clone_state(spec.setup(shape, dtype))
+    first_state = clone_state(seed_state)
+    second_state = clone_state(seed_state)
+    with torch.inference_mode():
+        first_outputs = implementation(first_state)
+        second_outputs = implementation(second_state)
+    atol, rtol = tolerances(dtype)
+    max_error = max_abs_error(first_outputs, second_outputs)
+    passed = all(
+        torch.allclose(first, second, atol=atol, rtol=rtol)
+        for first, second in zip(first_outputs, second_outputs)
+    )
+    return passed, max_error
+
+
 def benchmark(
     kernel: str,
     spec: KernelSpec,
@@ -199,12 +227,17 @@ def benchmark(
     validation_passed, validation_max_abs_error = validate_implementation(
         spec, implementation, shape, dtype_name
     )
+    deterministic_passed, determinism_max_abs_error = validate_determinism(
+        spec, implementation, shape, dtype_name
+    )
 
     all_times: list[float] = []
     repeat_means: list[float] = []
     snapshots: list[GpuSnapshot] = []
 
     for _ in range(repeats):
+        prime_state = spec.setup(shape, dtype)
+        prime_implementation(lambda: implementation(prime_state))
         state = spec.setup(shape, dtype)
         times = measure_once(lambda: implementation(state), warmup, n_iter)
         all_times.extend(times)
@@ -216,31 +249,43 @@ def benchmark(
     avg_ms = sum(repeat_means) / len(repeat_means)
     stddev_ms = statistics.stdev(repeat_means) if len(repeat_means) > 1 else 0.0
     repeat_cv_pct = 0.0 if avg_ms == 0 else (stddev_ms / avg_ms) * 100.0
-    warnings: list[str] = []
+    correctness_failures: list[str] = []
+    timing_warnings: list[str] = []
+    environment_warnings: list[str] = []
 
-    if repeat_cv_pct > 5.0:
-        warnings.append(f"repeat cv exceeded threshold ({repeat_cv_pct:.1f}%)")
+    if repeat_cv_pct > 15.0:
+        timing_warnings.append(f"repeat cv exceeded threshold ({repeat_cv_pct:.1f}%)")
 
     if snapshots:
         sm_clocks = [snapshot.sm_clock_mhz for snapshot in snapshots]
         sm_avg = sum(sm_clocks) / len(sm_clocks)
         sm_variation_pct = 0.0 if sm_avg == 0 else ((max(sm_clocks) - min(sm_clocks)) / sm_avg) * 100.0
-        if sm_variation_pct > 10.0:
-            warnings.append(f"sm clock varied materially ({sm_variation_pct:.1f}%)")
+        if sm_variation_pct > 5.0:
+            environment_warnings.append(f"sm clock varied materially ({sm_variation_pct:.1f}%)")
         if any(snapshot.sw_power_cap == "Active" for snapshot in snapshots):
-            warnings.append("power cap throttling observed")
+            environment_warnings.append("power cap throttling observed")
         if any(
             snapshot.sw_thermal_slowdown == "Active" or snapshot.hw_thermal_slowdown == "Active"
             for snapshot in snapshots
         ):
-            warnings.append("thermal throttling observed")
-        if any(snapshot.throttle_active != "Not Active" for snapshot in snapshots):
-            warnings.append("clock throttle reasons were active")
+            environment_warnings.append("thermal throttling observed")
         if max(snapshot.temp_c for snapshot in snapshots) >= 80.0:
-            warnings.append("gpu temperature reached high operating range")
+            environment_warnings.append("gpu temperature reached high operating range")
 
     if not validation_passed:
-        warnings.append(f"validation failed (max abs error {validation_max_abs_error:.4g})")
+        correctness_failures.append(
+            f"validation failed (max abs error {validation_max_abs_error:.4g})"
+        )
+    if not deterministic_passed:
+        correctness_failures.append(
+            f"determinism failed (max abs error {determinism_max_abs_error:.4g})"
+        )
+    if percentile(all_times, 0.99) > avg_ms * 3.0:
+        timing_warnings.append("p99 exceeded 3.0x avg timing")
+
+    has_timing_warning = bool(timing_warnings)
+    has_environment_warning = bool(environment_warnings)
+    unstable = bool(correctness_failures or timing_warnings or environment_warnings)
 
     return BenchResult(
         kernel=kernel,
@@ -257,16 +302,32 @@ def benchmark(
         repeats=repeats,
         validation_passed=validation_passed,
         validation_max_abs_error=validation_max_abs_error,
-        unstable=bool(warnings),
-        warnings=warnings,
+        deterministic_passed=deterministic_passed,
+        determinism_max_abs_error=determinism_max_abs_error,
+        has_timing_warning=has_timing_warning,
+        has_environment_warning=has_environment_warning,
+        unstable=unstable,
+        correctness_failures=correctness_failures,
+        timing_warnings=timing_warnings,
+        environment_warnings=environment_warnings,
     )
 
 
 def render_json(results: list[BenchResult], gpu_snapshot: GpuSnapshot | None) -> str:
-    grouped_warnings = [
+    grouped_correctness = [
         f"{result.kernel} {result.implementation} {result.shape[0]}x{result.shape[1]}: {warning}"
         for result in results
-        for warning in result.warnings
+        for warning in result.correctness_failures
+    ]
+    grouped_timing = [
+        f"{result.kernel} {result.implementation} {result.shape[0]}x{result.shape[1]}: {warning}"
+        for result in results
+        for warning in result.timing_warnings
+    ]
+    grouped_environment = [
+        f"{result.kernel} {result.implementation} {result.shape[0]}x{result.shape[1]}: {warning}"
+        for result in results
+        for warning in result.environment_warnings
     ]
     payload = {
         "gpu": None
@@ -295,11 +356,17 @@ def render_json(results: list[BenchResult], gpu_snapshot: GpuSnapshot | None) ->
                 "bandwidth_gb_s": result.bandwidth_gb_s,
                 "valid": result.validation_passed,
                 "validation_max_abs_error": result.validation_max_abs_error,
+                "deterministic": result.deterministic_passed,
+                "determinism_max_abs_error": result.determinism_max_abs_error,
+                "timing_warning": result.has_timing_warning,
+                "environment_warning": result.has_environment_warning,
                 "unstable": result.unstable,
             }
             for result in results
         ],
-        "warnings": grouped_warnings,
+        "correctness_failures": grouped_correctness,
+        "timing_warnings": grouped_timing,
+        "environment_warnings": grouped_environment,
     }
     return json.dumps(payload)
 

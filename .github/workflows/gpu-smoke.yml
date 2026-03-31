@@ -1,0 +1,36 @@
+name: gpu-smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 9 * * 1'
+
+jobs:
+  gpu-smoke:
+    runs-on: [self-hosted, gpu]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Unit tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Doctor
+        run: ./build/rlprof doctor
+
+      - name: Bench smoke
+        run: ./build/rlprof bench --kernel silu_and_mul --shapes 64x4096 --warmup 10 --n-iter 50 --repeats 3 --output auto
+
+      - name: Optional profile smoke
+        shell: bash
+        run: |
+          if [[ -n "${RLPROF_SMOKE_MODEL:-}" ]]; then
+            ./build/rlprof profile --model "$RLPROF_SMOKE_MODEL" --prompts 1 --rollouts 1 --min-tokens 8 --max-tokens 8 --input-len 16 --output .rlprof/ci_smoke
+          else
+            echo "RLPROF_SMOKE_MODEL not set; skipping profile smoke"
+          fi

@@ -27,6 +27,7 @@ std::vector<CategoryDelta> diff_profiles(
 
 std::string render_diff(
     const std::filesystem::path& path_a,
-    const std::filesystem::path& path_b);
+    const std::filesystem::path& path_b,
+    bool color = false);
 
 }  // namespace rlprof

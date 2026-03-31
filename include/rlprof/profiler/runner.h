@@ -14,6 +14,7 @@ namespace rlprof::profiler {
 
 struct ProfileConfig {
   std::string model;
+  std::string attach_server;
   std::int64_t prompts = 128;
   std::int64_t rollouts = 8;
   std::int64_t max_tokens = 4096;
@@ -27,6 +28,7 @@ struct ProfileConfig {
   std::filesystem::path output;
   std::int64_t startup_timeout_s = 300;
   std::int64_t metrics_interval_ms = 1000;
+  std::int64_t start_at_unix_ms = 0;
 };
 
 struct ProfileRunResult {

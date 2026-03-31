@@ -27,6 +27,7 @@
 #include "rlprof/profiler/parser.h"
 #include "rlprof/profiler/vllm_metrics.h"
 #include "rlprof/store.h"
+#include "rlprof/traffic.h"
 
 namespace rlprof::profiler {
 namespace {
@@ -64,8 +65,11 @@ std::string run_command(const std::string& command) {
   return output;
 }
 
-pid_t start_background_command(const std::string& command) {
-  const std::string wrapped = "bash -lc '" + command + " > /tmp/rlprof_server.log 2>&1 & echo $!'";
+pid_t start_background_command(
+    const std::string& command,
+    const std::filesystem::path& log_path) {
+  const std::string wrapped =
+      "bash -lc '" + command + " > " + log_path.string() + " 2>&1 & echo $!'";
   const std::string output = run_command(wrapped);
   return static_cast<pid_t>(std::stol(output));
 }
@@ -136,8 +140,10 @@ std::string trim(std::string value) {
   return value;
 }
 
-std::string server_log_tail(std::size_t max_lines = 120) {
-  std::ifstream stream("/tmp/rlprof_server.log");
+std::string server_log_tail(
+    const std::filesystem::path& log_path,
+    std::size_t max_lines = 120) {
+  std::ifstream stream(log_path);
   if (!stream.good()) {
     return "";
   }
@@ -161,8 +167,10 @@ std::string server_log_tail(std::size_t max_lines = 120) {
   return trim(tail.str());
 }
 
-std::runtime_error server_startup_error(const std::string& message) {
-  const std::string tail = server_log_tail();
+std::runtime_error server_startup_error(
+    const std::string& message,
+    const std::filesystem::path& log_path) {
+  const std::string tail = server_log_tail(log_path);
   if (tail.empty()) {
     return std::runtime_error(message);
   }
@@ -175,19 +183,6 @@ std::vector<std::string> split_csv_line(const std::string& line) {
   std::string part;
   while (std::getline(stream, part, ',')) {
     fields.push_back(trim(part));
-  }
-  return fields;
-}
-
-std::vector<std::string> split_csv_list(const std::string& line) {
-  std::vector<std::string> fields;
-  std::stringstream stream(line);
-  std::string part;
-  while (std::getline(stream, part, ',')) {
-    part = trim(part);
-    if (!part.empty()) {
-      fields.push_back(part);
-    }
   }
   return fields;
 }
@@ -255,7 +250,8 @@ void write_nvidia_smi_snapshot(const std::filesystem::path& output_prefix) {
   snapshot_path += "_nvidia_smi.xml";
   const std::string command =
       "nvidia-smi -q -x > " + snapshot_path.string() + " 2>/dev/null";
-  std::system(command.c_str());
+  const int rc = std::system(command.c_str());
+  static_cast<void>(rc);
 }
 
 std::vector<GpuTelemetrySample> poll_gpu_telemetry(
@@ -275,29 +271,6 @@ std::vector<GpuTelemetrySample> poll_gpu_telemetry(
     }
   }
   return samples;
-}
-
-template <typename Getter>
-std::string summary_triplet(
-    const std::vector<GpuTelemetrySample>& samples,
-    Getter getter,
-    int precision = 0) {
-  if (samples.empty()) {
-    return "";
-  }
-  double min_value = std::numeric_limits<double>::max();
-  double max_value = std::numeric_limits<double>::lowest();
-  double sum = 0.0;
-  for (const auto& sample : samples) {
-    const double value = getter(sample);
-    min_value = std::min(min_value, value);
-    max_value = std::max(max_value, value);
-    sum += value;
-  }
-  std::ostringstream stream;
-  stream << std::fixed << std::setprecision(precision)
-         << min_value << "," << (sum / samples.size()) << "," << max_value;
-  return stream.str();
 }
 
 template <typename Getter>
@@ -413,11 +386,21 @@ std::filesystem::path default_output_prefix(const ProfileConfig& config) {
   return std::filesystem::path(".rlprof") / (model + "_" + std::to_string(now));
 }
 
+std::filesystem::path server_log_path_for_output(
+    const std::filesystem::path& output_prefix) {
+  return output_prefix.parent_path() /
+         (output_prefix.stem().string() + "_server.log");
+}
+
 std::int64_t inferred_max_model_len(const ProfileConfig& config) {
   return std::max<std::int64_t>(2048, config.input_len + config.max_tokens);
 }
 
 std::string vllm_binary() {
+  const char* configured = std::getenv("RLPROF_VLLM_EXECUTABLE");
+  if (configured != nullptr && std::string(configured).size() > 0) {
+    return configured;
+  }
   if (std::filesystem::exists(".venv/bin/vllm")) {
     return ".venv/bin/vllm";
   }
@@ -441,9 +424,9 @@ void notify_progress(const ProgressCallback& progress, const std::string& status
 
 std::vector<std::string> cluster_server_urls(
     const ProfileConfig& config,
-    const std::string& local_server_url) {
+    const std::string& primary_server_url) {
   std::vector<std::string> servers;
-  servers.push_back(local_server_url);
+  servers.push_back(primary_server_url);
   for (const auto& peer : config.peer_servers) {
     if (!peer.empty()) {
       servers.push_back(peer);
@@ -465,17 +448,130 @@ std::vector<MetricEndpoint> metric_endpoints(
   return endpoints;
 }
 
+struct MonitoringCapture {
+  std::vector<MetricSample> metrics;
+  std::vector<GpuTelemetrySample> gpu_samples;
+};
+
+TrafficRun run_profile_traffic(
+    const ProfileConfig& config,
+    const std::vector<std::string>& traffic_servers) {
+  return fire_rl_traffic(
+      traffic_servers,
+      config.prompts,
+      config.rollouts,
+      config.min_tokens,
+      config.max_tokens,
+      config.input_len);
+}
+
+void wait_for_server_ready_or_throw(
+    pid_t server_pid,
+    const std::string& server_url,
+    std::int64_t startup_timeout_s,
+    const ProgressCallback& progress,
+    const std::filesystem::path& log_path) {
+  notify_progress(progress, "Waiting for server ready...");
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(startup_timeout_s);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (!process_alive(server_pid)) {
+      throw server_startup_error("vLLM server exited before becoming ready", log_path);
+    }
+    if (server_ready(server_url)) {
+      return;
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+  }
+
+  stop_process(server_pid);
+  throw server_startup_error(
+      "vLLM server did not become ready within " +
+      std::to_string(startup_timeout_s) + " seconds",
+      log_path);
+}
+
+MonitoringCapture capture_measured_run(
+    const ProfileConfig& config,
+    const std::vector<std::string>& traffic_servers,
+    const std::vector<MetricEndpoint>& metrics_endpoints,
+    const std::optional<std::string>& session_name,
+    const ProgressCallback& progress,
+    TrafficStats& traffic_stats) {
+  const bool trace_enabled = session_name.has_value();
+  if (trace_enabled) {
+    notify_progress(progress, "Collecting nsys trace...");
+    run_command("nsys start --session=" + *session_name);
+  } else {
+    notify_progress(progress, "Collecting metrics...");
+  }
+
+  std::atomic<bool> stop_flag{false};
+  std::vector<MetricSample> metrics;
+  std::vector<GpuTelemetrySample> gpu_samples;
+  std::thread metrics_thread([&]() {
+    metrics = poll_metrics(
+        metrics_endpoints,
+        std::chrono::milliseconds(config.metrics_interval_ms),
+        stop_flag);
+  });
+  std::thread gpu_thread([&]() {
+    gpu_samples = poll_gpu_telemetry(
+        std::chrono::milliseconds(config.metrics_interval_ms),
+        stop_flag);
+  });
+
+  try {
+    notify_progress(
+        progress,
+        "Firing RL traffic (" +
+            std::to_string(config.prompts * config.rollouts) + " requests)...");
+    const TrafficRun traffic_run = run_profile_traffic(config, traffic_servers);
+    traffic_stats = traffic_run.stats;
+
+    stop_flag.store(true);
+    if (metrics_thread.joinable()) {
+      metrics_thread.join();
+    }
+    if (gpu_thread.joinable()) {
+      gpu_thread.join();
+    }
+    if (trace_enabled) {
+      run_command("nsys stop --session=" + *session_name);
+    }
+    return MonitoringCapture{
+        .metrics = std::move(metrics),
+        .gpu_samples = std::move(gpu_samples),
+    };
+  } catch (...) {
+    stop_flag.store(true);
+    if (metrics_thread.joinable()) {
+      metrics_thread.join();
+    }
+    if (gpu_thread.joinable()) {
+      gpu_thread.join();
+    }
+    if (trace_enabled) {
+      run_command("nsys stop --session=" + *session_name);
+    }
+    throw;
+  }
+}
+
 }  // namespace
 
 ProfileRunResult run_profile(const ProfileConfig& config, ProgressCallback progress) {
   const std::filesystem::path output_prefix = default_output_prefix(config);
+  const std::filesystem::path server_log_path = server_log_path_for_output(output_prefix);
   std::filesystem::path nvidia_smi_snapshot_path = output_prefix;
   nvidia_smi_snapshot_path += "_nvidia_smi.xml";
   if (!output_prefix.parent_path().empty()) {
     std::filesystem::create_directories(output_prefix.parent_path());
   }
 
-  const std::string server_url = "http://127.0.0.1:" + std::to_string(config.port);
+  const bool attach_mode = !config.attach_server.empty();
+  const std::string server_url =
+      attach_mode ? config.attach_server : "http://127.0.0.1:" + std::to_string(config.port);
   const std::vector<std::string> traffic_servers =
       cluster_server_urls(config, server_url);
   const std::vector<MetricEndpoint> metrics_endpoints =
@@ -486,98 +582,47 @@ ProfileRunResult run_profile(const ProfileConfig& config, ProgressCallback progr
   const std::string vllm_version = trim(run_command(vllm_path + " --version"));
   const std::int64_t max_model_len = inferred_max_model_len(config);
   const std::string session_name = make_session_name(output_prefix);
-  notify_progress(progress, "Starting vLLM server...");
   write_nvidia_smi_snapshot(output_prefix);
-
-  const std::string serve_command =
-      "VLLM_WORKER_MULTIPROC_METHOD=spawn nsys profile --trace=cuda,nvtx,osrt "
-      "--sample=none --cpuctxsw=none --export=sqlite "
-      "--force-overwrite=true --session-new " + session_name +
-      " --start-later=true -o " + output_prefix.string() +
-      " " + vllm_path + " serve " + config.model +
-      " --port " + std::to_string(config.port) +
-      " --tensor-parallel-size " + std::to_string(config.tp) +
-      " --max-model-len " + std::to_string(max_model_len) +
-      (config.trust_remote_code ? " --trust-remote-code" : "");
-  const pid_t server_pid = start_background_command(serve_command);
-
-  std::atomic<bool> stop_flag{false};
-  std::vector<MetricSample> metrics;
-  std::vector<GpuTelemetrySample> gpu_samples;
-  std::thread metrics_thread;
-  std::thread gpu_thread;
+  pid_t server_pid = -1;
+  if (!attach_mode) {
+    notify_progress(progress, "Starting vLLM server...");
+    const std::string serve_command =
+        "VLLM_WORKER_MULTIPROC_METHOD=spawn nsys profile --trace=cuda,nvtx,osrt "
+        "--sample=none --cpuctxsw=none --export=sqlite "
+        "--force-overwrite=true --session-new " + session_name +
+        " --start-later=true -o " + output_prefix.string() +
+        " " + vllm_path + " serve " + config.model +
+        " --port " + std::to_string(config.port) +
+        " --tensor-parallel-size " + std::to_string(config.tp) +
+        " --max-model-len " + std::to_string(max_model_len) +
+        (config.trust_remote_code ? " --trust-remote-code" : "");
+    server_pid = start_background_command(serve_command, server_log_path);
+  }
 
   try {
-    notify_progress(progress, "Waiting for server ready...");
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(config.startup_timeout_s);
-    bool ready = false;
-    while (std::chrono::steady_clock::now() < deadline) {
-      if (!process_alive(server_pid)) {
-        throw server_startup_error("vLLM server exited before becoming ready");
+    if (!attach_mode) {
+      wait_for_server_ready_or_throw(
+          server_pid, server_url, config.startup_timeout_s, progress, server_log_path);
+    } else if (!server_ready(server_url)) {
+      throw std::runtime_error("attached server is not ready: " + server_url);
+    }
+
+    if (config.discard_first_run) {
+      notify_progress(progress, "Warming up server...");
+      static_cast<void>(run_profile_traffic(config, traffic_servers));
+    }
+
+    if (config.start_at_unix_ms > 0) {
+      const auto now_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::system_clock::now().time_since_epoch())
+              .count();
+      if (config.start_at_unix_ms > now_ms) {
+        notify_progress(progress, "Waiting for synchronized start...");
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(config.start_at_unix_ms - now_ms));
       }
-      if (server_ready(server_url)) {
-        ready = true;
-        break;
-      }
-      std::this_thread::sleep_for(std::chrono::seconds(1));
     }
-    if (!ready) {
-      stop_process(server_pid);
-      throw server_startup_error(
-          "vLLM server did not become ready within " +
-          std::to_string(config.startup_timeout_s) + " seconds");
-    }
-
-    notify_progress(progress, "Collecting nsys trace...");
-    run_command("nsys start --session=" + session_name);
-
-    metrics_thread = std::thread([&]() {
-      metrics = poll_metrics(
-          metrics_endpoints,
-          std::chrono::milliseconds(config.metrics_interval_ms),
-          stop_flag);
-    });
-    gpu_thread = std::thread([&]() {
-      gpu_samples = poll_gpu_telemetry(
-          std::chrono::milliseconds(config.metrics_interval_ms),
-          stop_flag);
-    });
-
-    notify_progress(
-        progress,
-        "Firing RL traffic (" +
-            std::to_string(config.prompts * config.rollouts) + " requests)...");
-    const std::filesystem::path self = std::filesystem::read_symlink("/proc/self/exe");
-    std::string traffic_command =
-        self.string() + " traffic " +
-        (traffic_servers.size() == 1
-             ? "--server " + server_url
-             : "--servers " + [&]() {
-                 std::ostringstream joined;
-                 for (std::size_t i = 0; i < traffic_servers.size(); ++i) {
-                   if (i > 0) {
-                     joined << ",";
-                   }
-                   joined << traffic_servers[i];
-                 }
-                 return joined.str();
-               }()) +
-        " --prompts " + std::to_string(config.prompts) +
-        " --rollouts-per-prompt " + std::to_string(config.rollouts) +
-        " --max-tokens " + std::to_string(config.max_tokens) +
-        " --min-tokens " + std::to_string(config.min_tokens) +
-        " --input-len " + std::to_string(config.input_len);
-    const std::string traffic_output = trim(run_command(traffic_command));
-
-    stop_flag.store(true);
-    if (metrics_thread.joinable()) {
-      metrics_thread.join();
-    }
-    if (gpu_thread.joinable()) {
-      gpu_thread.join();
-    }
-    run_command("nsys stop --session=" + session_name);
-    stop_process(server_pid);
 
     TrafficStats traffic_stats{
         .total_requests = 0,
@@ -587,41 +632,33 @@ ProfileRunResult run_profile(const ProfileConfig& config, ProgressCallback progr
         .max_median_ratio = std::nullopt,
         .errors = 0,
     };
-    {
-      const auto extract = [&](const std::string& key) -> std::optional<double> {
-        const std::string needle = "\"" + key + "\":";
-        const std::size_t start = traffic_output.find(needle);
-        if (start == std::string::npos) {
-          return std::nullopt;
-        }
-        std::size_t index = start + needle.size();
-        while (index < traffic_output.size() && std::isspace(static_cast<unsigned char>(traffic_output[index]))) {
-          ++index;
-        }
-        std::size_t end = index;
-        while (end < traffic_output.size() &&
-               (std::isdigit(static_cast<unsigned char>(traffic_output[end])) ||
-                traffic_output[end] == '.' || traffic_output[end] == '-')) {
-          ++end;
-        }
-        return std::stod(traffic_output.substr(index, end - index));
-      };
-      traffic_stats.total_requests = static_cast<std::int64_t>(extract("total_requests").value_or(0.0));
-      traffic_stats.completion_length_mean = extract("completion_length_mean");
-      traffic_stats.completion_length_p50 = extract("completion_length_p50");
-      traffic_stats.completion_length_p99 = extract("completion_length_p99");
-      traffic_stats.max_median_ratio = extract("max_median_ratio");
-      traffic_stats.errors = static_cast<std::int64_t>(extract("errors").value_or(0.0));
+    const MonitoringCapture capture = capture_measured_run(
+        config,
+        traffic_servers,
+        metrics_endpoints,
+        attach_mode ? std::nullopt : std::optional<std::string>(session_name),
+        progress,
+        traffic_stats);
+    if (!attach_mode) {
+      stop_process(server_pid);
     }
 
-    std::filesystem::path sqlite_path = output_prefix;
-    sqlite_path.replace_extension(".sqlite");
-    if (!wait_for_kernel_table(sqlite_path, std::chrono::seconds(30))) {
-      throw std::runtime_error("timed out waiting for nsys sqlite export readiness: " + sqlite_path.string());
+    std::filesystem::path sqlite_path;
+    std::vector<KernelRecord> kernels;
+    if (!attach_mode) {
+      sqlite_path = output_prefix;
+      sqlite_path.replace_extension(".sqlite");
+      if (!wait_for_kernel_table(sqlite_path, std::chrono::seconds(30))) {
+        throw std::runtime_error("timed out waiting for nsys sqlite export readiness: " + sqlite_path.string());
+      }
+      notify_progress(progress, "Parsing kernel data...");
+      kernels = parse_nsys_sqlite(sqlite_path);
     }
-    notify_progress(progress, "Parsing kernel data...");
-    const std::vector<KernelRecord> kernels = parse_nsys_sqlite(sqlite_path);
-    const std::vector<MetricSummary> summaries = summarize_samples(metrics);
+    const std::vector<MetricSummary> summaries = summarize_samples(capture.metrics);
+    std::filesystem::path db_path = output_prefix;
+    db_path.replace_extension(".db");
+    std::filesystem::path nsys_rep_path = output_prefix;
+    nsys_rep_path.replace_extension(".nsys-rep");
 
     ProfileData profile;
     profile.meta = {
@@ -651,12 +688,20 @@ ProfileRunResult run_profile(const ProfileConfig& config, ProgressCallback progr
         {"max_model_len", std::to_string(max_model_len)},
         {"trust_remote_code", config.trust_remote_code ? "true" : "false"},
         {"discard_first_run", config.discard_first_run ? "true" : "false"},
+        {"measurement_untraced_warmup", config.discard_first_run ? "true" : "false"},
+        {"attach_mode", attach_mode ? "true" : "false"},
+        {"attach_server", attach_mode ? config.attach_server : ""},
         {"port", std::to_string(config.port)},
         {"tp", std::to_string(config.tp)},
         {"measurement_nvidia_smi_xml", nvidia_smi_snapshot_path.string()},
+        {"artifact_server_log_path", server_log_path.string()},
+        {"artifact_db_path", db_path.string()},
+        {"artifact_nsys_rep_path", attach_mode ? "" : nsys_rep_path.string()},
+        {"artifact_nsys_sqlite_path", attach_mode ? "" : sqlite_path.string()},
         {"measurement_gpu_clock_policy", rlprof::render_clock_policy(clock_policy)},
         {"measurement_gpu_clocks_locked", clock_policy.gpu_clocks_locked ? "true" : "false"},
         {"measurement_gpu_clock_policy_query_ok", clock_policy.query_ok ? "true" : "false"},
+        {"measurement_start_at_unix_ms", std::to_string(config.start_at_unix_ms)},
     };
     if (clock_policy.max_sm_clock_mhz.has_value()) {
       profile.meta["measurement_gpu_max_sm_clock_mhz"] =
@@ -669,16 +714,18 @@ ProfileRunResult run_profile(const ProfileConfig& config, ProgressCallback progr
     if (clock_policy.query_ok && !clock_policy.gpu_clocks_locked) {
       profile.meta["warning_gpu_clocks_unlocked"] = "true";
     }
-    for (const auto& [key, value] : measurement_metadata(gpu_samples)) {
+    if (attach_mode) {
+      profile.meta["warning_no_kernel_trace"] = "true";
+      profile.meta["cluster_trace_scope"] = "metrics_only_attach";
+    }
+    for (const auto& [key, value] : measurement_metadata(capture.gpu_samples)) {
       profile.meta[key] = value;
     }
     profile.kernels = kernels;
-    profile.metrics = metrics;
+    profile.metrics = capture.metrics;
     profile.metrics_summary = summaries;
     profile.traffic_stats = traffic_stats;
 
-    std::filesystem::path db_path = output_prefix;
-    db_path.replace_extension(".db");
     notify_progress(progress, "Saving profile...");
     save_profile(db_path, profile);
 
@@ -687,19 +734,16 @@ ProfileRunResult run_profile(const ProfileConfig& config, ProgressCallback progr
         .nsys_sqlite_path = sqlite_path,
         .meta = profile.meta,
         .kernels = kernels,
-        .metrics = metrics,
+        .metrics = capture.metrics,
         .traffic_stats = traffic_stats,
     };
   } catch (...) {
-    stop_flag.store(true);
-    if (metrics_thread.joinable()) {
-      metrics_thread.join();
+    if (!attach_mode) {
+      const int stop_rc =
+          std::system(("nsys stop --session=" + session_name + " > /dev/null 2>&1").c_str());
+      static_cast<void>(stop_rc);
+      stop_process(server_pid);
     }
-    if (gpu_thread.joinable()) {
-      gpu_thread.join();
-    }
-    std::system(("nsys stop --session=" + session_name + " > /dev/null 2>&1").c_str());
-    stop_process(server_pid);
     throw;
   }
 }

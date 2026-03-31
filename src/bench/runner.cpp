@@ -278,8 +278,43 @@ bool is_null(const JsonParser::Value& value) {
   return std::holds_alternative<std::nullptr_t>(value.data);
 }
 
+std::vector<std::string> parse_string_array(
+    const JsonParser::Object& object,
+    const std::string& key) {
+  std::vector<std::string> values;
+  const auto it = object.find(key);
+  if (it == object.end()) {
+    return values;
+  }
+  for (const auto& item : as_array(it->second)) {
+    values.push_back(as_string(item));
+  }
+  return values;
+}
+
 Shape parse_shape_spec(const std::string& value) {
   return parse_shapes(value).front();
+}
+
+std::string json_escape(const std::string& input) {
+  std::string output;
+  for (char ch : input) {
+    switch (ch) {
+      case '\\':
+        output += "\\\\";
+        break;
+      case '"':
+        output += "\\\"";
+        break;
+      case '\n':
+        output += "\\n";
+        break;
+      default:
+        output.push_back(ch);
+        break;
+    }
+  }
+  return output;
 }
 
 }  // namespace
@@ -369,6 +404,10 @@ std::vector<BenchResult> benchmark_impl(
         .bandwidth_gb_s = bandwidth_gb_s,
         .validation_passed = true,
         .validation_max_abs_error = 0.0,
+        .deterministic_passed = true,
+        .determinism_max_abs_error = 0.0,
+        .has_timing_warning = false,
+        .has_environment_warning = false,
         .unstable = false,
     });
   }
@@ -410,12 +449,9 @@ BenchRunOutput parse_bench_json(const std::string& json_text) {
     };
   }
 
-  const auto warnings_it = object.find("warnings");
-  if (warnings_it != object.end()) {
-    for (const auto& warning : as_array(warnings_it->second)) {
-      output.warnings.push_back(as_string(warning));
-    }
-  }
+  output.correctness_failures = parse_string_array(object, "correctness_failures");
+  output.timing_warnings = parse_string_array(object, "timing_warnings");
+  output.environment_warnings = parse_string_array(object, "environment_warnings");
 
   for (const auto& item : as_array(object.at("results"))) {
     const auto& result = as_object(item);
@@ -433,6 +469,10 @@ BenchRunOutput parse_bench_json(const std::string& json_text) {
         .bandwidth_gb_s = as_number(result.at("bandwidth_gb_s")),
         .validation_passed = as_bool(result.at("valid")),
         .validation_max_abs_error = as_number(result.at("validation_max_abs_error")),
+        .deterministic_passed = as_bool(result.at("deterministic")),
+        .determinism_max_abs_error = as_number(result.at("determinism_max_abs_error")),
+        .has_timing_warning = as_bool(result.at("timing_warning")),
+        .has_environment_warning = as_bool(result.at("environment_warning")),
         .unstable = as_bool(result.at("unstable")),
     });
   }
@@ -444,8 +484,92 @@ std::string render_bench_results(const std::vector<BenchResult>& results) {
   return render_bench_output(BenchRunOutput{
       .gpu = std::nullopt,
       .results = results,
-      .warnings = {},
+      .correctness_failures = {},
+      .timing_warnings = {},
+      .environment_warnings = {},
   });
+}
+
+std::string serialize_bench_output_json(const BenchRunOutput& output) {
+  std::ostringstream out;
+  out << "{";
+  out << "\"gpu\":";
+  if (output.gpu.has_value()) {
+    out << "{"
+        << "\"name\":\"" << json_escape(output.gpu->name) << "\","
+        << "\"driver_version\":\"" << json_escape(output.gpu->driver_version) << "\","
+        << "\"sm_clock_mhz\":" << output.gpu->sm_clock_mhz << ","
+        << "\"mem_clock_mhz\":" << output.gpu->mem_clock_mhz << ","
+        << "\"temp_c\":" << output.gpu->temp_c << ","
+        << "\"power_draw_w\":" << output.gpu->power_draw_w << ","
+        << "\"power_limit_w\":" << output.gpu->power_limit_w
+        << "}";
+  } else {
+    out << "null";
+  }
+  auto write_string_array = [&](const std::string& key, const std::vector<std::string>& values) {
+    out << ",\"" << key << "\":[";
+    for (std::size_t i = 0; i < values.size(); ++i) {
+      if (i > 0) {
+        out << ",";
+      }
+      out << "\"" << json_escape(values[i]) << "\"";
+    }
+    out << "]";
+  };
+  write_string_array("correctness_failures", output.correctness_failures);
+  write_string_array("timing_warnings", output.timing_warnings);
+  write_string_array("environment_warnings", output.environment_warnings);
+  out << ",\"results\":[";
+  for (std::size_t i = 0; i < output.results.size(); ++i) {
+    const auto& result = output.results[i];
+    if (i > 0) {
+      out << ",";
+    }
+    std::ostringstream shape_stream;
+    for (std::size_t j = 0; j < result.shape.size(); ++j) {
+      if (j > 0) {
+        shape_stream << "x";
+      }
+      shape_stream << result.shape[j];
+    }
+    out << "{"
+        << "\"kernel\":\"" << json_escape(result.kernel) << "\","
+        << "\"implementation\":\"" << json_escape(result.implementation) << "\","
+        << "\"shape\":\"" << shape_stream.str() << "\","
+        << "\"dtype\":\"" << json_escape(result.dtype) << "\","
+        << "\"avg_us\":" << (result.avg_ms * 1000.0) << ","
+        << "\"stddev_us\":" << (result.stddev_ms * 1000.0) << ","
+        << "\"cv_pct\":" << result.repeat_cv_pct << ","
+        << "\"min_us\":" << (result.min_ms * 1000.0) << ","
+        << "\"p50_us\":" << (result.p50_ms * 1000.0) << ","
+        << "\"p99_us\":" << (result.p99_ms * 1000.0) << ","
+        << "\"bandwidth_gb_s\":" << result.bandwidth_gb_s << ","
+        << "\"valid\":" << (result.validation_passed ? "true" : "false") << ","
+        << "\"validation_max_abs_error\":" << result.validation_max_abs_error << ","
+        << "\"deterministic\":" << (result.deterministic_passed ? "true" : "false") << ","
+        << "\"determinism_max_abs_error\":" << result.determinism_max_abs_error << ","
+        << "\"timing_warning\":" << (result.has_timing_warning ? "true" : "false") << ","
+        << "\"environment_warning\":" << (result.has_environment_warning ? "true" : "false") << ","
+        << "\"unstable\":" << (result.unstable ? "true" : "false")
+        << "}";
+  }
+  out << "]}";
+  return out.str();
+}
+
+std::filesystem::path resolve_bench_output_path(
+    const std::string& kernel,
+    const std::string& output_spec) {
+  if (output_spec.empty() || output_spec == "none") {
+    return {};
+  }
+  if (output_spec != "auto") {
+    return output_spec;
+  }
+  const auto now = std::chrono::system_clock::now().time_since_epoch().count();
+  return std::filesystem::path(".rlprof") /
+         ("bench_" + kernel + "_" + std::to_string(now) + ".json");
 }
 
 std::string render_bench_output(const BenchRunOutput& output) {
@@ -470,8 +594,11 @@ std::string render_bench_output(const BenchRunOutput& output) {
       << std::setw(8) << "p99 us" << "  "
       << std::setw(11) << "GB/s" << "  "
       << std::setw(5) << "valid" << "  "
+      << std::setw(5) << "det" << "  "
+      << std::setw(6) << "timing" << "  "
+      << std::setw(6) << "env" << "  "
       << std::setw(8) << "unstable" << "\n";
-  out << std::string(141, '-') << "\n";
+  out << std::string(165, '-') << "\n";
   for (const BenchResult& result : output.results) {
     std::ostringstream shape_stream;
     for (std::size_t i = 0; i < result.shape.size(); ++i) {
@@ -492,11 +619,26 @@ std::string render_bench_output(const BenchRunOutput& output) {
         << std::setw(8) << (result.p99_ms * 1000.0) << "  "
         << std::setw(11) << result.bandwidth_gb_s << "  "
         << std::setw(5) << (result.validation_passed ? "yes" : "no") << "  "
+        << std::setw(5) << (result.deterministic_passed ? "yes" : "no") << "  "
+        << std::setw(6) << (result.has_timing_warning ? "yes" : "no") << "  "
+        << std::setw(6) << (result.has_environment_warning ? "yes" : "no") << "  "
         << std::setw(8) << (result.unstable ? "yes" : "no") << "\n";
   }
-  if (!output.warnings.empty()) {
-    out << "\nMEASUREMENT WARNINGS\n";
-    for (const auto& warning : output.warnings) {
+  if (!output.correctness_failures.empty()) {
+    out << "\nCORRECTNESS FAILURES\n";
+    for (const auto& warning : output.correctness_failures) {
+      out << "- " << warning << "\n";
+    }
+  }
+  if (!output.timing_warnings.empty()) {
+    out << "\nTIMING WARNINGS\n";
+    for (const auto& warning : output.timing_warnings) {
+      out << "- " << warning << "\n";
+    }
+  }
+  if (!output.environment_warnings.empty()) {
+    out << "\nENVIRONMENT WARNINGS\n";
+    for (const auto& warning : output.environment_warnings) {
       out << "- " << warning << "\n";
     }
   }
