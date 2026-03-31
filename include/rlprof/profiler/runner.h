@@ -15,6 +15,7 @@ namespace rlprof::profiler {
 struct ProfileConfig {
   std::string model;
   std::string attach_server;
+  std::int64_t attach_pid = 0;
   std::int64_t prompts = 128;
   std::int64_t rollouts = 8;
   std::int64_t max_tokens = 4096;

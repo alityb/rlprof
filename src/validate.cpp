@@ -82,11 +82,15 @@ std::vector<ValidationCheck> validate_profile(const std::filesystem::path& db_pa
   const bool metrics_only_profile =
       profile.meta.contains("warning_no_kernel_trace") &&
       profile.meta.at("warning_no_kernel_trace") == "true";
+  const bool remote_report_not_fetched =
+      profile.meta.contains("warning_remote_nsys_report_not_fetched") &&
+      profile.meta.at("warning_remote_nsys_report_not_fetched") == "true";
   std::size_t missing_required = 0;
   std::size_t missing_optional = 0;
   for (const auto& artifact : artifacts) {
     const bool optional_export =
-        artifact.kind == "json export" || artifact.kind.ends_with("csv");
+        artifact.kind == "json export" || artifact.kind.ends_with("csv") ||
+        artifact.kind == "server log";
     const bool optional_aggregate_trace =
         aggregated_profile &&
         (artifact.kind == "nsys report" || artifact.kind == "nsys sqlite" ||
@@ -95,8 +99,11 @@ std::vector<ValidationCheck> validate_profile(const std::filesystem::path& db_pa
         metrics_only_profile &&
         (artifact.kind == "nsys report" || artifact.kind == "nsys sqlite" ||
          artifact.kind == "nvidia-smi xml");
+    const bool optional_remote_report =
+        remote_report_not_fetched && artifact.kind == "nsys report";
     if (!artifact.exists) {
-      if (optional_export || optional_aggregate_trace || optional_metrics_only_trace) {
+      if (optional_export || optional_aggregate_trace || optional_metrics_only_trace ||
+          optional_remote_report) {
         ++missing_optional;
       } else {
         ++missing_required;

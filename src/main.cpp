@@ -54,6 +54,7 @@ struct ProfileCommandOptions {
   rlprof::profiler::ProfileConfig config;
   rlprof::RemoteTarget target;
   std::int64_t repeats = 1;
+  bool fetch_nsys_rep = false;
   bool assume_yes = false;
   bool show_help = false;
 };
@@ -258,13 +259,15 @@ void copy_remote_file_if_present(
 void rewrite_profile_artifact_paths(
     const std::filesystem::path& local_db_path,
     const rlprof::RemoteTarget& target,
-    const std::string& remote_db_path) {
+    const std::string& remote_db_path,
+    bool fetched_nsys_rep) {
   auto profile = rlprof::load_profile(local_db_path);
   profile.meta["remote_target_host"] = target.host;
   profile.meta["remote_target_workdir"] = target.workdir;
   profile.meta["artifact_db_path"] = local_db_path.string();
   profile.meta["artifact_nsys_sqlite_path"] = with_extension_local(local_db_path, ".sqlite").string();
-  profile.meta["artifact_nsys_rep_path"] = with_extension_local(local_db_path, ".nsys-rep").string();
+  profile.meta["artifact_nsys_rep_path"] =
+      fetched_nsys_rep ? with_extension_local(local_db_path, ".nsys-rep").string() : "";
   profile.meta["measurement_nvidia_smi_xml"] = with_suffix_local(local_db_path, "_nvidia_smi.xml").string();
   profile.meta["artifact_server_log_path"] = with_suffix_local(local_db_path, "_remote_server.log").string();
   profile.meta["remote_artifact_db_path"] = remote_db_path;
@@ -272,24 +275,28 @@ void rewrite_profile_artifact_paths(
   profile.meta["remote_artifact_nsys_rep_path"] = with_extension(remote_db_path, ".nsys-rep");
   profile.meta["remote_measurement_nvidia_smi_xml"] = with_suffix_remote(remote_db_path, "_nvidia_smi.xml");
   profile.meta["remote_artifact_server_log_path"] = with_suffix_remote(remote_db_path, "_server.log");
+  profile.meta["warning_remote_nsys_report_not_fetched"] = fetched_nsys_rep ? "false" : "true";
   rlprof::save_profile(local_db_path, profile);
 }
 
 void fetch_remote_profile_artifacts(
     const rlprof::RemoteTarget& target,
     const std::filesystem::path& local_db_path,
-    const std::string& remote_db_path) {
+    const std::string& remote_db_path,
+    bool fetch_nsys_rep) {
   copy_remote_file_if_present(target, remote_db_path, local_db_path, true);
   copy_remote_file_if_present(
       target,
       with_extension(remote_db_path, ".sqlite"),
       with_extension_local(local_db_path, ".sqlite"),
       true);
-  copy_remote_file_if_present(
-      target,
-      with_extension(remote_db_path, ".nsys-rep"),
-      with_extension_local(local_db_path, ".nsys-rep"),
-      true);
+  if (fetch_nsys_rep) {
+    copy_remote_file_if_present(
+        target,
+        with_extension(remote_db_path, ".nsys-rep"),
+        with_extension_local(local_db_path, ".nsys-rep"),
+        true);
+  }
   copy_remote_file_if_present(
       target,
       with_suffix_remote(remote_db_path, "_nvidia_smi.xml"),
@@ -300,7 +307,7 @@ void fetch_remote_profile_artifacts(
       with_suffix_remote(remote_db_path, "_server.log"),
       with_suffix_local(local_db_path, "_remote_server.log"),
       false);
-  rewrite_profile_artifact_paths(local_db_path, target, remote_db_path);
+  rewrite_profile_artifact_paths(local_db_path, target, remote_db_path, fetch_nsys_rep);
 }
 
 std::string trim(std::string value) {
@@ -384,6 +391,100 @@ std::string try_run_command_capture(const std::string& command) {
   return trim(output);
 }
 
+std::string remote_bootstrap_check_script() {
+  return R"BOOT(bash -lc '
+print_row() {
+  printf "%-18s  %-6s  %s\n" "$1" "$2" "$3"
+}
+
+tool_python() {
+  if [ -n "${RLPROF_PYTHON_EXECUTABLE:-}" ]; then
+    if [ -x "$RLPROF_PYTHON_EXECUTABLE" ]; then
+      print_row python PASS "$RLPROF_PYTHON_EXECUTABLE ($("$RLPROF_PYTHON_EXECUTABLE" --version 2>&1 | head -n 1))"
+    else
+      print_row python FAIL "missing configured executable: $RLPROF_PYTHON_EXECUTABLE"
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
+    return
+  fi
+  py3=$(command -v python3 2>/dev/null || true)
+  py=$(command -v python 2>/dev/null || true)
+  if [ -n "$py3" ] && [ -n "$py" ] && [ "$py3" != "$py" ]; then
+    print_row python FAIL "ambiguous defaults: $py3, $py"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    return
+  fi
+  chosen="$py3"
+  if [ -z "$chosen" ]; then
+    chosen="$py"
+  fi
+  if [ -n "$chosen" ]; then
+    print_row python PASS "$chosen ($("$chosen" --version 2>&1 | head -n 1))"
+  else
+    print_row python FAIL "not found"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+}
+
+tool_vllm() {
+  if [ -n "${RLPROF_VLLM_EXECUTABLE:-}" ]; then
+    if [ -x "$RLPROF_VLLM_EXECUTABLE" ]; then
+      print_row vllm PASS "$RLPROF_VLLM_EXECUTABLE ($("$RLPROF_VLLM_EXECUTABLE" --version 2>&1 | head -n 1))"
+    else
+      print_row vllm FAIL "missing configured executable: $RLPROF_VLLM_EXECUTABLE"
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
+    return
+  fi
+  chosen=$(command -v vllm 2>/dev/null || true)
+  if [ -n "$chosen" ]; then
+    print_row vllm PASS "$chosen ($("$chosen" --version 2>&1 | head -n 1))"
+  else
+    print_row vllm FAIL "not found"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+}
+
+tool_simple() {
+  label="$1"
+  version_arg="$2"
+  chosen=$(command -v "$label" 2>/dev/null || true)
+  if [ -n "$chosen" ]; then
+    if [ -n "$version_arg" ]; then
+      print_row "$label" PASS "$chosen ($("$chosen" "$version_arg" 2>&1 | head -n 1))"
+    else
+      print_row "$label" PASS "$chosen"
+    fi
+  else
+    print_row "$label" FAIL "not found"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+}
+
+tool_cuda() {
+  gpu_line=$(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null | head -n 1 || true)
+  gpu_count=$(nvidia-smi --query-gpu=index --format=csv,noheader,nounits 2>/dev/null | wc -l | tr -d " " || true)
+  if [ -n "$gpu_line" ] && [ "${gpu_count:-0}" -gt 0 ]; then
+    print_row "cuda visibility" PASS "$gpu_line | visible GPUs=$gpu_count"
+  else
+    print_row "cuda visibility" FAIL "no visible NVIDIA GPUs"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+}
+
+FAIL_COUNT=0
+printf "BOOTSTRAP\n\n"
+printf "%-18s  %-6s  %s\n" "check" "status" "detail"
+printf "%s\n" "------------------------------------------------------------------------"
+tool_simple cmake --version
+tool_python
+tool_vllm
+tool_simple nsys --version
+tool_cuda
+exit "$FAIL_COUNT"
+)BOOT";
+}
+
 std::int64_t current_unix_ms() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::system_clock::now().time_since_epoch())
@@ -412,6 +513,8 @@ ProfileCommandOptions parse_profile_args(const Args& args) {
       options.config.model = require_value(args, i, "--model");
     } else if (args[i] == "--attach") {
       options.config.attach_server = require_value(args, i, "--attach");
+    } else if (args[i] == "--attach-pid") {
+      options.config.attach_pid = std::stoll(require_value(args, i, "--attach-pid"));
     } else if (args[i] == "--target") {
       options.target.host = require_value(args, i, "--target");
     } else if (args[i] == "--target-workdir") {
@@ -438,6 +541,8 @@ ProfileCommandOptions parse_profile_args(const Args& args) {
       options.config.output = require_value(args, i, "--output");
     } else if (args[i] == "--repeat") {
       options.repeats = std::stoll(require_value(args, i, "--repeat"));
+    } else if (args[i] == "--fetch-nsys-rep") {
+      options.fetch_nsys_rep = true;
     } else if (args[i] == "--start-at-ms") {
       options.config.start_at_unix_ms = std::stoll(require_value(args, i, "--start-at-ms"));
     } else if (args[i] == "--discard-first-run") {
@@ -466,9 +571,14 @@ std::string run_profile_command(
   if (effective_options.repeats <= 0) {
     throw std::runtime_error("--repeat must be > 0");
   }
+  if (effective_options.config.attach_pid > 0 &&
+      !rlprof::has_remote_target(effective_options.target)) {
+    throw std::runtime_error("--attach-pid requires --target HOST");
+  }
 
   if (rlprof::has_remote_target(effective_options.target)) {
-    if (!effective_options.config.attach_server.empty()) {
+    if (!effective_options.config.attach_server.empty() &&
+        effective_options.config.attach_pid <= 0) {
       auto attach_result = rlprof::profiler::run_profile(effective_options.config, progress);
       auto attach_profile = rlprof::load_profile(attach_result.db_path);
       attach_profile.meta["remote_target_host"] = effective_options.target.host;
@@ -484,7 +594,21 @@ std::string run_profile_command(
     const std::string remote_output_base =
         rlprof::remote_join(effective_options.target, local_output_base);
 
-    Args remote_args = {"profile", "--model", effective_options.config.model};
+    Args remote_args = {"profile"};
+    if (!effective_options.config.attach_server.empty()) {
+      remote_args.insert(
+          remote_args.end(),
+          {"--attach", effective_options.config.attach_server});
+    } else {
+      remote_args.insert(
+          remote_args.end(),
+          {"--model", effective_options.config.model});
+    }
+    if (effective_options.config.attach_pid > 0) {
+      remote_args.insert(
+          remote_args.end(),
+          {"--attach-pid", std::to_string(effective_options.config.attach_pid)});
+    }
     remote_args.insert(remote_args.end(), {"--prompts", std::to_string(effective_options.config.prompts)});
     remote_args.insert(remote_args.end(), {"--rollouts", std::to_string(effective_options.config.rollouts)});
     remote_args.insert(remote_args.end(), {"--min-tokens", std::to_string(effective_options.config.min_tokens)});
@@ -532,9 +656,8 @@ std::string run_profile_command(
           std::string(exc.what()) + "\n\nremote vLLM log tail:\n" + tail);
     }
 
-    std::ostringstream output;
-    std::vector<rlprof::ProfileData> profiles;
-    profiles.reserve(static_cast<std::size_t>(effective_options.repeats));
+    std::vector<std::future<rlprof::ProfileData>> fetch_futures;
+    fetch_futures.reserve(static_cast<std::size_t>(effective_options.repeats));
     for (std::int64_t run_index = 1; run_index <= effective_options.repeats; ++run_index) {
       const std::filesystem::path local_db_path =
           effective_options.repeats == 1
@@ -544,9 +667,27 @@ std::string run_profile_command(
           effective_options.repeats == 1
               ? with_extension(remote_output_base, ".db")
               : with_extension(append_repeat_suffix(remote_output_base, run_index), ".db");
+      fetch_futures.push_back(std::async(
+          std::launch::async,
+          [target = effective_options.target,
+           local_db_path,
+           remote_db_path,
+           fetch_nsys_rep = effective_options.fetch_nsys_rep]() {
+            fetch_remote_profile_artifacts(target, local_db_path, remote_db_path, fetch_nsys_rep);
+            return rlprof::load_profile(local_db_path);
+          }));
+    }
+
+    std::ostringstream output;
+    std::vector<rlprof::ProfileData> profiles;
+    profiles.reserve(static_cast<std::size_t>(effective_options.repeats));
+    for (std::int64_t run_index = 1; run_index <= effective_options.repeats; ++run_index) {
+      const std::filesystem::path local_db_path =
+          effective_options.repeats == 1
+              ? with_extension_local(local_output_base, ".db")
+              : with_extension_local(append_repeat_suffix(local_output_base, run_index), ".db");
       notify_progress(progress, "Fetching remote artifacts for run " + std::to_string(run_index) + "...");
-      fetch_remote_profile_artifacts(effective_options.target, local_db_path, remote_db_path);
-      profiles.push_back(rlprof::load_profile(local_db_path));
+      profiles.push_back(fetch_futures[static_cast<std::size_t>(run_index - 1)].get());
       output << local_db_path.string() << "\n";
     }
 
@@ -618,9 +759,9 @@ int handle_profile(const Args& args) {
   options.target = resolve_cli_target(options.target);
   if (options.show_help) {
     std::cout << "Usage: rlprof profile (--model MODEL | --attach URL) [options] [--repeat N]\n"
-              << "       optional: --attach URL --peer-servers URL1,URL2,...\n"
+              << "       optional: --attach URL --attach-pid PID --peer-servers URL1,URL2,...\n"
               << "                 --target HOST --target-workdir DIR\n"
-              << "       flags: --discard-first-run --yes\n";
+              << "       flags: --discard-first-run --fetch-nsys-rep --yes\n";
     return 0;
   }
   std::cout << run_profile_command(options);
@@ -751,6 +892,12 @@ int handle_trace(const Args& args) {
         }
         throw std::runtime_error("failed to open nsys-ui for " + artifact.path.string());
       }
+    }
+    if (profile.meta.contains("remote_artifact_nsys_rep_path") &&
+        !profile.meta.at("remote_artifact_nsys_rep_path").empty()) {
+      throw std::runtime_error(
+          "no local nsys report artifact available; rerun with --fetch-nsys-rep or use recover "
+          "to copy " + profile.meta.at("remote_artifact_nsys_rep_path"));
     }
     throw std::runtime_error("no nsys report artifact available to open");
   }
@@ -1061,11 +1208,24 @@ int handle_target(const Args& args) {
     if (!vllm_executable.empty()) {
       target.vllm_executable = vllm_executable;
     }
+    try {
+      std::cout << run_command_capture(
+          rlprof::remote_shell_command(target, remote_bootstrap_check_script()));
+    } catch (const std::exception& exc) {
+      throw std::runtime_error(
+          "remote bootstrap preflight failed for " + target.host + "\n\n" + exc.what());
+    }
     const auto command =
         rlprof::bootstrap_target_command(target, std::filesystem::current_path().string());
     const int rc = std::system(command.c_str());
     if (rc != 0) {
       throw std::runtime_error("remote bootstrap failed for " + target.host);
+    }
+    const auto doctor_output = run_command_capture(
+        rlprof::remote_cli_command(target, {"doctor"}));
+    std::cout << doctor_output;
+    if (doctor_output.find("FAIL") != std::string::npos) {
+      throw std::runtime_error("remote bootstrap validation failed for " + target.host);
     }
     std::cout << "Bootstrapped " << target.host << " at " << target.workdir << "\n";
     return 0;
@@ -1096,7 +1256,7 @@ int handle_recover(const Args& args) {
   if (!rlprof::has_remote_target(target) || remote_db_path.empty() || local_output.empty()) {
     throw std::runtime_error("recover requires --target, --remote-db, and --output");
   }
-  fetch_remote_profile_artifacts(target, local_output, remote_db_path);
+  fetch_remote_profile_artifacts(target, local_output, remote_db_path, true);
   std::cout << local_output.string() << "\n";
   return 0;
 }
@@ -1841,7 +2001,7 @@ _rlprof_complete() {
   fi
   case "${COMP_WORDS[1]}" in
         profile)
-          COMPREPLY=( $(compgen -W "--model --attach --target --target-workdir --prompts --rollouts --min-tokens --max-tokens --input-len --port --tp --peer-servers --trust-remote-code --discard-first-run --repeat --output --yes --help" -- "$cur") )
+          COMPREPLY=( $(compgen -W "--model --attach --attach-pid --target --target-workdir --prompts --rollouts --min-tokens --max-tokens --input-len --port --tp --peer-servers --trust-remote-code --discard-first-run --repeat --fetch-nsys-rep --output --yes --help" -- "$cur") )
           ;;
     bench)
       COMPREPLY=( $(compgen -W "--kernel --target --target-workdir --shapes --dtype --warmup --n-iter --repeats --output --yes --help" -- "$cur") )
@@ -1916,7 +2076,7 @@ _rlprof() {
     args)
       case $words[2] in
         profile)
-          _arguments '--model[model name]' '--attach[existing server url]' '--target[ssh target host]' '--target-workdir[remote rlprof workdir]' '--prompts[prompt count]' '--rollouts[rollouts per prompt]' '--min-tokens[min output tokens]' '--max-tokens[max output tokens]' '--input-len[input length]' '--port[server port]' '--tp[tensor parallel size]' '--peer-servers[peer endpoints]' '--trust-remote-code[trust remote code]' '--discard-first-run[run and discard a warmup pass]' '--repeat[repeat count]' '--output[output path]' '--yes[accept saved defaults]' '--help[show help]'
+          _arguments '--model[model name]' '--attach[existing server url]' '--attach-pid[remote process id]' '--target[ssh target host]' '--target-workdir[remote rlprof workdir]' '--prompts[prompt count]' '--rollouts[rollouts per prompt]' '--min-tokens[min output tokens]' '--max-tokens[max output tokens]' '--input-len[input length]' '--port[server port]' '--tp[tensor parallel size]' '--peer-servers[peer endpoints]' '--trust-remote-code[trust remote code]' '--discard-first-run[run and discard a warmup pass]' '--repeat[repeat count]' '--fetch-nsys-rep[copy the remote nsys report locally]' '--output[output path]' '--yes[accept saved defaults]' '--help[show help]'
           ;;
         bench)
           _arguments '--kernel[kernel name]' '--target[ssh target host]' '--target-workdir[remote rlprof workdir]' '--shapes[shape list]' '--dtype[data type]' '--warmup[warmup iterations]' '--n-iter[timed iterations]' '--repeats[repeat count]' '--output[result output path]' '--yes[accept saved defaults]' '--help[show help]'
@@ -1969,6 +2129,7 @@ complete -c rlprof -n '__fish_use_subcommand' -a 'completion' -d 'print shell co
 complete -c rlprof -n '__fish_use_subcommand' -a 'help' -d 'show help'
 complete -c rlprof -n '__fish_seen_subcommand_from profile' -l model
 complete -c rlprof -n '__fish_seen_subcommand_from profile' -l attach
+complete -c rlprof -n '__fish_seen_subcommand_from profile' -l attach-pid
 complete -c rlprof -n '__fish_seen_subcommand_from profile' -l target
 complete -c rlprof -n '__fish_seen_subcommand_from profile' -l target-workdir
 complete -c rlprof -n '__fish_seen_subcommand_from profile' -l prompts
@@ -1982,6 +2143,7 @@ complete -c rlprof -n '__fish_seen_subcommand_from profile' -l peer-servers
 complete -c rlprof -n '__fish_seen_subcommand_from profile' -l trust-remote-code
 complete -c rlprof -n '__fish_seen_subcommand_from profile' -l discard-first-run
 complete -c rlprof -n '__fish_seen_subcommand_from profile' -l repeat
+complete -c rlprof -n '__fish_seen_subcommand_from profile' -l fetch-nsys-rep
 complete -c rlprof -n '__fish_seen_subcommand_from profile' -l output
 complete -c rlprof -n '__fish_seen_subcommand_from profile' -l yes
 complete -c rlprof -n '__fish_seen_subcommand_from bench' -l kernel -a 'silu_and_mul fused_add_rms_norm rotary_embedding'
@@ -2031,7 +2193,7 @@ void print_help() {
             << "Commands:\n"
             << "  version\n"
             << "  profile (--model MODEL | --attach URL) [options] [--repeat N]\n"
-            << "    optional: --attach URL --target HOST --target-workdir DIR\n"
+            << "    optional: --attach URL --attach-pid PID --target HOST --target-workdir DIR\n"
             << "              --peer-servers URL1,URL2,... --discard-first-run --yes\n"
             << "  cluster-profile --targets T1,T2 [profile options] --output base\n"
             << "  soak-profile [profile options] --iterations N --output base [--pause-sec N] [--validate-each]\n"

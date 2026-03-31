@@ -52,13 +52,19 @@ std::string remote_join(const RemoteTarget& target, const std::filesystem::path&
   return target.workdir + "/.rlprof/" + leaf;
 }
 
+std::string remote_shell_command(
+    const RemoteTarget& target,
+    const std::string& shell_command) {
+  return "ssh " + shell_escape(target.host) + " " +
+         shell_escape(remote_env_prefix(target) + shell_command);
+}
+
 std::string remote_cli_command(
     const RemoteTarget& target,
     const std::vector<std::string>& args) {
-  const std::string remote_command =
-      remote_env_prefix(target) +
-      "cd " + shell_escape(target.workdir) + " && ./build/rlprof " + join_args(args);
-  return "ssh " + shell_escape(target.host) + " " + shell_escape(remote_command);
+  return remote_shell_command(
+      target,
+      "cd " + shell_escape(target.workdir) + " && ./build/rlprof " + join_args(args));
 }
 
 std::string remote_file_exists_command(

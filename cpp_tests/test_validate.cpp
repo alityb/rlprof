@@ -150,6 +150,17 @@ int main() {
   expect_true(rendered.find("VALIDATE") != std::string::npos, "expected validate header");
   expect_true(rendered.find("kernel totals") != std::string::npos, "expected kernel totals row");
 
+  profile.meta["artifact_nsys_rep_path"] = "";
+  profile.meta["remote_artifact_nsys_rep_path"] = "/remote/sample.nsys-rep";
+  profile.meta["warning_remote_nsys_report_not_fetched"] = "true";
+  rlprof::save_profile(db_path, profile);
+  fs::remove(rep_path);
+
+  const auto remote_checks = rlprof::validate_profile(db_path);
+  expect_true(
+      status_for(remote_checks, "artifacts") == rlprof::ValidationStatus::kWarn,
+      "expected remote no-report fetch artifacts validation warn");
+
   fs::remove_all(temp_root);
   return 0;
 }

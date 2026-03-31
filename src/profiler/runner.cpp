@@ -24,6 +24,7 @@
 #include <sys/types.h>
 
 #include "rlprof/clock_control.h"
+#include "rlprof/doctor.h"
 #include "rlprof/profiler/parser.h"
 #include "rlprof/profiler/vllm_metrics.h"
 #include "rlprof/store.h"
@@ -47,6 +48,19 @@ struct GpuTelemetrySample {
   std::string sw_thermal_slowdown;
   std::string hw_thermal_slowdown;
 };
+
+std::string shell_escape(const std::string& value) {
+  std::string escaped = "'";
+  for (char ch : value) {
+    if (ch == '\'') {
+      escaped += "'\\''";
+    } else {
+      escaped.push_back(ch);
+    }
+  }
+  escaped += "'";
+  return escaped;
+}
 
 std::string run_command(const std::string& command) {
   std::array<char, 4096> buffer{};
@@ -407,6 +421,39 @@ std::string vllm_binary() {
   return "vllm";
 }
 
+bool profile_help_mentions_pid_attach(const std::string& nsys_path) {
+  try {
+    const std::string help = run_command(shell_escape(nsys_path) + " profile --help");
+    return help.find("--pid") != std::string::npos;
+  } catch (...) {
+    return false;
+  }
+}
+
+void validate_profile_environment(
+    const ProfileConfig& config,
+    const RuntimeEnvironmentInfo& environment) {
+  if (config.attach_pid > 0 && config.attach_server.empty()) {
+    throw std::runtime_error("--attach-pid requires --attach URL");
+  }
+  if (!environment.nsys.found || environment.nsys.ambiguous) {
+    throw std::runtime_error("nsys unavailable: " + environment.nsys.detail);
+  }
+  if (environment.cuda_visible_device_count <= 0) {
+    throw std::runtime_error("CUDA visibility check failed: no visible NVIDIA GPUs");
+  }
+  if (!environment.vllm.found || environment.vllm.ambiguous) {
+    throw std::runtime_error("vllm unavailable: " + environment.vllm.detail);
+  }
+  if (config.attach_pid > 0 &&
+      !profile_help_mentions_pid_attach(environment.nsys.resolved_path)) {
+    throw std::runtime_error(
+        "attach-by-process requires an nsys CLI that advertises PID attach support; "
+        "installed nsys is " +
+        environment.nsys.version);
+  }
+}
+
 std::string make_session_name(const std::filesystem::path& output_prefix) {
   std::string session = "rlprof_";
   const std::string stem = output_prefix.filename().string();
@@ -570,16 +617,20 @@ ProfileRunResult run_profile(const ProfileConfig& config, ProgressCallback progr
   }
 
   const bool attach_mode = !config.attach_server.empty();
+  const bool attach_by_process = attach_mode && config.attach_pid > 0;
   const std::string server_url =
       attach_mode ? config.attach_server : "http://127.0.0.1:" + std::to_string(config.port);
   const std::vector<std::string> traffic_servers =
       cluster_server_urls(config, server_url);
   const std::vector<MetricEndpoint> metrics_endpoints =
       metric_endpoints(traffic_servers);
-  const std::string gpu_name = trim(run_command("nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1"));
+  const RuntimeEnvironmentInfo environment = inspect_runtime_environment();
+  validate_profile_environment(config, environment);
+  const std::string gpu_name = environment.gpu_name;
   const rlprof::ClockPolicyInfo clock_policy = rlprof::query_clock_policy();
-  const std::string vllm_path = vllm_binary();
-  const std::string vllm_version = trim(run_command(vllm_path + " --version"));
+  const std::string vllm_path =
+      environment.vllm.resolved_path.empty() ? vllm_binary() : environment.vllm.resolved_path;
+  const std::string vllm_version = environment.vllm.version;
   const std::int64_t max_model_len = inferred_max_model_len(config);
   const std::string session_name = make_session_name(output_prefix);
   write_nvidia_smi_snapshot(output_prefix);
@@ -597,6 +648,13 @@ ProfileRunResult run_profile(const ProfileConfig& config, ProgressCallback progr
         " --max-model-len " + std::to_string(max_model_len) +
         (config.trust_remote_code ? " --trust-remote-code" : "");
     server_pid = start_background_command(serve_command, server_log_path);
+  }
+
+  if (attach_by_process) {
+    throw std::runtime_error(
+        "attach-by-process requested for PID " + std::to_string(config.attach_pid) +
+        ", but this build only enables it when the installed nsys exposes a supported "
+        "PID attach workflow. Installed nsys: " + environment.nsys.version);
   }
 
   try {
@@ -691,6 +749,7 @@ ProfileRunResult run_profile(const ProfileConfig& config, ProgressCallback progr
         {"measurement_untraced_warmup", config.discard_first_run ? "true" : "false"},
         {"attach_mode", attach_mode ? "true" : "false"},
         {"attach_server", attach_mode ? config.attach_server : ""},
+        {"attach_pid", std::to_string(config.attach_pid)},
         {"port", std::to_string(config.port)},
         {"tp", std::to_string(config.tp)},
         {"measurement_nvidia_smi_xml", nvidia_smi_snapshot_path.string()},
@@ -703,6 +762,9 @@ ProfileRunResult run_profile(const ProfileConfig& config, ProgressCallback progr
         {"measurement_gpu_clock_policy_query_ok", clock_policy.query_ok ? "true" : "false"},
         {"measurement_start_at_unix_ms", std::to_string(config.start_at_unix_ms)},
     };
+    for (const auto& [key, value] : runtime_environment_metadata(environment)) {
+      profile.meta[key] = value;
+    }
     if (clock_policy.max_sm_clock_mhz.has_value()) {
       profile.meta["measurement_gpu_max_sm_clock_mhz"] =
           std::to_string(*clock_policy.max_sm_clock_mhz);

@@ -15,6 +15,9 @@ struct RemoteTarget {
 
 bool has_remote_target(const RemoteTarget& target);
 std::string remote_join(const RemoteTarget& target, const std::filesystem::path& local_path);
+std::string remote_shell_command(
+    const RemoteTarget& target,
+    const std::string& shell_command);
 std::string remote_cli_command(
     const RemoteTarget& target,
     const std::vector<std::string>& args);

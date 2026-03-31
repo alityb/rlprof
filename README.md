@@ -104,6 +104,19 @@ For a remote GPU host with a checked-out and built `rlprof` tree:
 
 This runs `vllm`, `nsys`, and the profiler on the remote host over SSH, then copies the core artifacts back locally and rewrites the saved artifact paths in the fetched `.db`.
 
+For faster remote iteration, `rlprof` now skips copying the heavy remote `.nsys-rep` by default and only fetches the `.db`, `.sqlite`, telemetry XML, and server log. If you want the full report artifact locally too:
+
+```bash
+./build/rlprof profile \
+  --target ubuntu@a10g-box \
+  --target-workdir /srv/rlprof \
+  --model Qwen/Qwen3-8B \
+  --fetch-nsys-rep \
+  --output .rlprof/qwen3_8b_remote_full
+```
+
+Without `--fetch-nsys-rep`, `trace --open` will point you at the stored remote report path and tell you to rerun with `--fetch-nsys-rep` or use `recover`.
+
 For models that require remote code:
 
 ```bash

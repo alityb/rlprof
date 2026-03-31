@@ -2,8 +2,11 @@
 
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <iomanip>
+#include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -35,6 +38,19 @@ CommandResult run_command(const std::string& command) {
   return CommandResult{.ok = rc == 0, .output = output};
 }
 
+std::string shell_escape(const std::string& value) {
+  std::string escaped = "'";
+  for (char ch : value) {
+    if (ch == '\'') {
+      escaped += "'\\''";
+    } else {
+      escaped.push_back(ch);
+    }
+  }
+  escaped += "'";
+  return escaped;
+}
+
 std::string first_line(const std::string& text) {
   const auto pos = text.find('\n');
   return pos == std::string::npos ? text : text.substr(0, pos);
@@ -48,26 +64,103 @@ std::string last_line(const std::string& text) {
   return pos == std::string::npos ? text : text.substr(pos + 1);
 }
 
-std::string resolved_python() {
-  const char* configured = std::getenv("RLPROF_PYTHON_EXECUTABLE");
-  if (configured != nullptr && std::string(configured).size() > 0) {
-    return configured;
+std::string configured_value(const char* key) {
+  const char* value = std::getenv(key);
+  if (value == nullptr) {
+    return "";
   }
-  if (std::filesystem::exists(".venv/bin/python")) {
-    return ".venv/bin/python";
-  }
-  return "python3";
+  return value;
 }
 
-std::string resolved_vllm() {
-  const char* configured = std::getenv("RLPROF_VLLM_EXECUTABLE");
-  if (configured != nullptr && std::string(configured).size() > 0) {
-    return configured;
+std::optional<std::string> resolve_candidate_path(
+    const std::string& candidate,
+    bool path_lookup) {
+  if (path_lookup) {
+    const auto resolved = run_command("command -v " + shell_escape(candidate));
+    if (!resolved.ok || resolved.output.empty()) {
+      return std::nullopt;
+    }
+    return first_line(resolved.output);
   }
-  if (std::filesystem::exists(".venv/bin/vllm")) {
-    return ".venv/bin/vllm";
+  if (!std::filesystem::exists(candidate)) {
+    return std::nullopt;
   }
-  return "vllm";
+  return std::filesystem::absolute(candidate).lexically_normal().string();
+}
+
+RuntimeToolInfo resolve_tool(
+    const std::string& explicit_path,
+    const std::vector<std::vector<std::pair<std::string, bool>>>& candidate_tiers,
+    const std::string& version_arg) {
+  RuntimeToolInfo tool;
+  tool.requested_path = explicit_path;
+  tool.explicit_config = !explicit_path.empty();
+
+  if (tool.explicit_config) {
+    tool.resolved_path = explicit_path;
+    const auto version =
+        run_command(shell_escape(explicit_path) + " " + version_arg);
+    tool.found = version.ok;
+    tool.version = version.ok ? first_line(version.output) : "";
+    tool.detail = version.ok ? first_line(version.output)
+                             : last_line(version.output.empty() ? "missing" : version.output);
+    return tool;
+  }
+
+  for (const auto& tier : candidate_tiers) {
+    std::set<std::string> resolved_paths;
+    for (const auto& [candidate, path_lookup] : tier) {
+      const auto resolved = resolve_candidate_path(candidate, path_lookup);
+      if (resolved.has_value()) {
+        resolved_paths.insert(*resolved);
+      }
+    }
+    if (resolved_paths.empty()) {
+      continue;
+    }
+    if (resolved_paths.size() > 1) {
+      tool.ambiguous = true;
+      std::ostringstream detail;
+      bool first = true;
+      for (const auto& path : resolved_paths) {
+        if (!first) {
+          detail << ", ";
+        }
+        first = false;
+        detail << path;
+      }
+      tool.detail = "ambiguous candidates: " + detail.str();
+      return tool;
+    }
+    tool.resolved_path = *resolved_paths.begin();
+    const auto version =
+        run_command(shell_escape(tool.resolved_path) + " " + version_arg);
+    tool.found = version.ok;
+    tool.version = version.ok ? first_line(version.output) : "";
+    tool.detail = version.ok ? first_line(version.output)
+                             : last_line(version.output.empty() ? "missing" : version.output);
+    return tool;
+  }
+
+  tool.detail = "not found";
+  return tool;
+}
+
+DoctorStatus tool_status(const RuntimeToolInfo& tool) {
+  if (tool.ambiguous || !tool.found) {
+    return DoctorStatus::kFail;
+  }
+  return DoctorStatus::kPass;
+}
+
+std::string tool_detail(const RuntimeToolInfo& tool) {
+  if (tool.ambiguous || !tool.found) {
+    return tool.detail;
+  }
+  if (tool.resolved_path.empty()) {
+    return tool.version;
+  }
+  return tool.resolved_path + " (" + tool.version + ")";
 }
 
 std::string status_label(DoctorStatus status) {
@@ -84,41 +177,151 @@ std::string status_label(DoctorStatus status) {
 
 }  // namespace
 
-std::vector<DoctorCheck> run_doctor() {
+RuntimeEnvironmentInfo inspect_runtime_environment() {
+  RuntimeEnvironmentInfo environment;
+  environment.python = resolve_tool(
+      configured_value("RLPROF_PYTHON_EXECUTABLE"),
+      {
+          {{".venv/bin/python", false}},
+          {{"venv/bin/python", false}},
+          {{"python3", true}, {"python", true}},
+      },
+      "--version");
+  environment.vllm = resolve_tool(
+      configured_value("RLPROF_VLLM_EXECUTABLE"),
+      {
+          {{".venv/bin/vllm", false}},
+          {{"venv/bin/vllm", false}},
+          {{"vllm", true}},
+      },
+      "--version");
+  environment.nsys = resolve_tool(
+      "",
+      {
+          {{"nsys", true}},
+      },
+      "--version");
+
+  const auto gpu = run_command(
+      "nvidia-smi --query-gpu=name,driver_version --format=csv,noheader,nounits | head -n 1");
+  if (gpu.ok && !gpu.output.empty()) {
+    const auto comma = gpu.output.find(',');
+    if (comma == std::string::npos) {
+      environment.gpu_name = first_line(gpu.output);
+    } else {
+      environment.gpu_name = first_line(gpu.output.substr(0, comma));
+      environment.driver_version = first_line(gpu.output.substr(comma + 1));
+      while (!environment.driver_version.empty() &&
+             environment.driver_version.front() == ' ') {
+        environment.driver_version.erase(environment.driver_version.begin());
+      }
+    }
+  }
+
+  const auto visible_devices = run_command(
+      "nvidia-smi --query-gpu=index --format=csv,noheader,nounits");
+  if (visible_devices.ok) {
+    std::stringstream stream(visible_devices.output);
+    std::string line;
+    std::vector<std::string> ids;
+    while (std::getline(stream, line)) {
+      line = first_line(line);
+      if (!line.empty()) {
+        ids.push_back(line);
+      }
+    }
+    environment.cuda_visible_device_count = static_cast<std::int64_t>(ids.size());
+    std::ostringstream joined;
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+      if (i > 0) {
+        joined << ",";
+      }
+      joined << ids[i];
+    }
+    environment.cuda_visible_devices = joined.str();
+  }
+
+  if (environment.python.found && !environment.python.ambiguous &&
+      environment.vllm.found && !environment.vllm.ambiguous) {
+    const auto bench = run_command(
+        shell_escape(environment.python.resolved_path) +
+        " -c \"import torch, vllm, rlprof_py.bench_cuda; "
+        "raise SystemExit(0 if torch.cuda.is_available() else 1)\"");
+    environment.bench_helper_ok = bench.ok;
+    environment.bench_helper_detail =
+        bench.ok ? "torch, vllm, and CUDA available" : last_line(bench.output);
+  } else {
+    environment.bench_helper_detail = "python/vllm unresolved";
+  }
+
+  const auto nsys_env = run_command("nsys status -e");
+  environment.nsys_environment_ok = nsys_env.ok;
+  environment.nsys_environment_detail = first_line(nsys_env.output);
+
+  return environment;
+}
+
+std::vector<DoctorCheck> doctor_checks_from_environment(
+    const RuntimeEnvironmentInfo& environment) {
   std::vector<DoctorCheck> checks;
-
-  const auto nvidia_smi = run_command(
-      "nvidia-smi --query-gpu=name --format=csv,noheader,nounits | head -n 1");
   checks.push_back(DoctorCheck{
-      .name = "nvidia-smi",
-      .status = nvidia_smi.ok && !nvidia_smi.output.empty() ? DoctorStatus::kPass
-                                                            : DoctorStatus::kFail,
-      .detail = nvidia_smi.ok ? nvidia_smi.output : first_line(nvidia_smi.output),
+      .name = "python",
+      .status = tool_status(environment.python),
+      .detail = tool_detail(environment.python),
   });
-
-  const auto nsys = run_command("nsys --version");
-  checks.push_back(DoctorCheck{
-      .name = "nsys",
-      .status = nsys.ok ? DoctorStatus::kPass : DoctorStatus::kFail,
-      .detail = first_line(nsys.output),
-  });
-
-  const auto vllm = run_command(resolved_vllm() + " --version");
   checks.push_back(DoctorCheck{
       .name = "vllm",
-      .status = vllm.ok ? DoctorStatus::kPass : DoctorStatus::kFail,
-      .detail = first_line(vllm.output),
+      .status = tool_status(environment.vllm),
+      .detail = tool_detail(environment.vllm),
   });
-
-  const auto bench = run_command(
-      resolved_python() +
-      " -c \"import torch, vllm, rlprof_py.bench_cuda; "
-      "raise SystemExit(0 if torch.cuda.is_available() else 1)\"");
+  checks.push_back(DoctorCheck{
+      .name = "nsys",
+      .status = tool_status(environment.nsys),
+      .detail = tool_detail(environment.nsys),
+  });
+  checks.push_back(DoctorCheck{
+      .name = "cuda visibility",
+      .status = environment.cuda_visible_device_count > 0 ? DoctorStatus::kPass
+                                                          : DoctorStatus::kFail,
+      .detail = environment.cuda_visible_device_count > 0
+                    ? environment.gpu_name + " visible GPUs=" +
+                          std::to_string(environment.cuda_visible_device_count)
+                    : "no visible NVIDIA GPUs",
+  });
+  checks.push_back(DoctorCheck{
+      .name = "driver",
+      .status = !environment.driver_version.empty() ? DoctorStatus::kPass
+                                                    : DoctorStatus::kFail,
+      .detail = environment.driver_version.empty() ? "driver unknown"
+                                                   : environment.driver_version,
+  });
   checks.push_back(DoctorCheck{
       .name = "bench helper",
-      .status = bench.ok ? DoctorStatus::kPass : DoctorStatus::kWarn,
-      .detail = bench.ok ? "torch, vllm, and CUDA available" : last_line(bench.output),
+      .status = environment.bench_helper_ok ? DoctorStatus::kPass : DoctorStatus::kFail,
+      .detail = environment.bench_helper_detail,
   });
+  return checks;
+}
+
+std::map<std::string, std::string> runtime_environment_metadata(
+    const RuntimeEnvironmentInfo& environment) {
+  return {
+      {"measurement_python_path", environment.python.resolved_path},
+      {"measurement_python_version", environment.python.version},
+      {"measurement_vllm_path", environment.vllm.resolved_path},
+      {"measurement_vllm_version", environment.vllm.version},
+      {"measurement_nsys_path", environment.nsys.resolved_path},
+      {"measurement_nsys_version", environment.nsys.version},
+      {"measurement_nvidia_driver_version", environment.driver_version},
+      {"measurement_cuda_visible_devices", environment.cuda_visible_devices},
+      {"measurement_cuda_visible_device_count",
+       std::to_string(environment.cuda_visible_device_count)},
+  };
+}
+
+std::vector<DoctorCheck> run_doctor() {
+  const RuntimeEnvironmentInfo environment = inspect_runtime_environment();
+  auto checks = doctor_checks_from_environment(environment);
 
   const ClockPolicyInfo clock_policy = query_clock_policy();
   checks.push_back(DoctorCheck{
@@ -129,12 +332,11 @@ std::vector<DoctorCheck> run_doctor() {
                                                       : DoctorStatus::kWarn),
       .detail = render_clock_policy(clock_policy),
   });
-
-  const auto nsys_env = run_command("nsys status -e");
   checks.push_back(DoctorCheck{
       .name = "nsys environment",
-      .status = nsys_env.ok ? DoctorStatus::kPass : DoctorStatus::kWarn,
-      .detail = first_line(nsys_env.output),
+      .status = environment.nsys_environment_ok ? DoctorStatus::kPass
+                                                : DoctorStatus::kWarn,
+      .detail = environment.nsys_environment_detail,
   });
 
   return checks;
