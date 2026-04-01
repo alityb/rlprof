@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.1 - 2026-04-01
+## v0.1.2 - 2026-04-01
 
 Packaging and release automation update.
 
