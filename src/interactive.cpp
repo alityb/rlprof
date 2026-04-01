@@ -653,6 +653,7 @@ void run_with_progress(
     std::lock_guard<std::mutex> lock(status_mutex);
     status = next_status;
   };
+  const bool tty_stdout = isatty(STDOUT_FILENO);
 
   std::thread worker([&] {
     try {
@@ -669,9 +670,14 @@ void run_with_progress(
       std::lock_guard<std::mutex> lock(status_mutex);
       current_status = status;
     }
-    std::cout << "\r  " << color_code(CYAN)
+    if (tty_stdout) {
+      std::cout << "\r\033[2K";
+    } else {
+      std::cout << "\r";
+    }
+    std::cout << "  " << color_code(CYAN)
               << spinner[static_cast<std::size_t>(frame)] << color_code(RESET)
-              << " " << current_status << "    " << std::flush;
+              << " " << current_status << std::flush;
     frame = (frame + 1) % static_cast<int>(spinner.size());
     std::this_thread::sleep_for(std::chrono::milliseconds(120));
   }
@@ -680,7 +686,7 @@ void run_with_progress(
     worker.join();
   }
 
-  if (isatty(STDOUT_FILENO)) {
+  if (tty_stdout) {
     std::cout << "\r\033[2K" << std::flush;
   } else {
     std::cout << "\n";

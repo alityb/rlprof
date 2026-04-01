@@ -810,7 +810,7 @@ ProfileRunResult finalize_profile_run(
   if (!attach_mode || attach_mode_kind != "metrics_only") {
     sqlite_path = output_prefix;
     sqlite_path.replace_extension(".sqlite");
-    if (!wait_for_kernel_table(sqlite_path, std::chrono::seconds(30))) {
+    if (!wait_for_kernel_table(sqlite_path, std::chrono::seconds(180))) {
       throw std::runtime_error(
           "timed out waiting for nsys sqlite export readiness: " +
           sqlite_path.string());
