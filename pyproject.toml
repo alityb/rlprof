@@ -1,14 +1,12 @@
 [build-system]
 requires = [
-    "cmake>=3.28",
-    "ninja>=1.11",
     "scikit-build-core>=0.10",
 ]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "rlprof"
-version = "0.1.0"
+version = "0.1.1"
 description = "Profile vLLM inference under RL-style rollout workloads."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -46,7 +44,49 @@ bench = [
 rlprof = "rlprof_py.cli:main"
 
 [tool.scikit-build]
+sdist.include = [
+    "CMakeLists.txt",
+    "include/**",
+    "src/**",
+    "rlprof_py/**",
+    "README.md",
+    "CHANGELOG.md",
+]
+sdist.exclude = [
+    "._*",
+    "**/._*",
+    ".DS_Store",
+    "**/.DS_Store",
+    ".venv/**",
+    ".publish-venv/**",
+    "dist/**",
+    "build/**",
+]
+wheel.exclude = [
+    "._*",
+    "**/._*",
+    ".DS_Store",
+    "**/.DS_Store",
+    ".venv/**",
+    ".publish-venv/**",
+    "dist/**",
+    "build/**",
+]
 wheel.packages = ["rlprof_py"]
+
+[tool.cibuildwheel]
+build = ["cp310-manylinux_x86_64", "cp311-manylinux_x86_64", "cp312-manylinux_x86_64"]
+skip = ["pp*"]
+test-command = [
+    "rlprof version",
+    "python -c \"import rlprof_py; print(rlprof_py.__version__)\"",
+]
+
+[tool.cibuildwheel.linux]
+manylinux-x86_64-image = "manylinux_2_28"
+before-all = [
+    "dnf install -y sqlite-devel",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,5 +1,7 @@
 .venv/
+.publish-venv/
 build/
+dist/
 .rlprof/
 __pycache__/
 *.pyc
@@ -17,3 +19,4 @@ __pycache__/
 AGENTS.md
 logs.md
 ._*
+.DS_Store

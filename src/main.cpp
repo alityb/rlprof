@@ -2752,7 +2752,7 @@ int main(int argc, char** argv) {
     }
 
     if (command == "version") {
-      std::cout << "rlprof 0.1.0\n";
+      std::cout << "rlprof 0.1.1\n";
       return 0;
     }
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.1 - 2026-04-01
+
+Packaging and release automation update.
+
+Highlights:
+
+- PyPI source distribution cleanup so local virtualenvs, build outputs, and macOS metadata files do not leak into published artifacts
+- Linux wheel build configuration via `cibuildwheel` for CPython 3.10, 3.11, and 3.12 on `manylinux_2_28`
+- GitHub Actions release workflow for building `sdist` plus Linux wheels and publishing to PyPI via trusted publishing on GitHub Releases
+
 ## v0.1.0 - 2026-03-31
 
 Initial public release.
