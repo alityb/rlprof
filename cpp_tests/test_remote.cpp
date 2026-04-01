@@ -47,6 +47,26 @@ int main() {
           profile_command.find("RLPROF_VLLM_EXECUTABLE") != std::string::npos,
       "expected remote environment exports");
 
+  const std::string attach_command =
+      rlprof::remote_cli_command(
+          target,
+          {"profile",
+           "--attach",
+           "http://127.0.0.1:8070",
+           "--attach-pid",
+           "215839",
+           "--prompts",
+           "1",
+           "--rollouts",
+           "1",
+           "--output",
+           "/srv/rlprof/.rlprof/attach_remote"});
+  expect_true(
+      attach_command.find("profile") != std::string::npos &&
+          attach_command.find("attach_remote") != std::string::npos &&
+          attach_command.find("215839") != std::string::npos,
+      "expected remote attach argument forwarding: " + attach_command);
+
   const std::string copy_command =
       rlprof::remote_copy_from_command(
           target,

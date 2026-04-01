@@ -14,6 +14,17 @@ void expect_true(bool condition, const std::string& message) {
   }
 }
 
+template <typename Fn>
+void expect_throw(Fn&& fn, const std::string& message) {
+  try {
+    fn();
+  } catch (const std::exception&) {
+    return;
+  }
+  std::cerr << message << "\n";
+  std::exit(1);
+}
+
 }  // namespace
 
 int main() {
@@ -49,9 +60,9 @@ int main() {
   expect_true(direct.host == "ubuntu@direct-box", "expected direct host");
   expect_true(direct.workdir == "/tmp/rlprof", "expected direct workdir");
 
-  const auto alias = rlprof::resolve_target("gpu-a10g", "/opt/rlprof");
-  expect_true(alias.host == "gpu-a10g", "expected alias host fallback");
-  expect_true(alias.workdir == "/opt/rlprof", "expected alias workdir fallback");
+  expect_throw(
+      []() { static_cast<void>(rlprof::resolve_target("gpu-a10g", "/opt/rlprof")); },
+      "expected unknown alias target to throw");
 
   const auto rendered = rlprof::render_targets(listed);
   expect_true(rendered.find("TARGETS") != std::string::npos, "expected target table header");

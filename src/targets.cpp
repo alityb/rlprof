@@ -162,11 +162,6 @@ RemoteTarget resolve_target(const std::string& spec, const std::string& workdir_
   const auto targets = load_target_map();
   const auto it = targets.find(spec);
   if (it == targets.end()) {
-    if (!workdir_override.empty()) {
-      target.host = spec;
-      target.workdir = workdir_override;
-      return target;
-    }
     throw std::runtime_error("unknown target: " + spec);
   }
   target.host = it->second.host;

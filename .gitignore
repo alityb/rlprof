@@ -16,3 +16,4 @@ __pycache__/
 *_traffic_stats.csv
 AGENTS.md
 logs.md
+._*

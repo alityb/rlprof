@@ -28,8 +28,10 @@ add_library(
   src/traffic.cpp
   src/validate.cpp
   src/profiler/categorizer.cpp
+  src/profiler/attach.cpp
   src/profiler/parser.cpp
   src/profiler/runner.cpp
+  src/profiler/server.cpp
   src/profiler/vllm_metrics.cpp
   src/report.cpp
   src/store.cpp
@@ -74,6 +76,13 @@ if(BUILD_TESTING)
   )
   target_link_libraries(test_categorizer PRIVATE rlprof_core)
   add_test(NAME test_categorizer COMMAND test_categorizer)
+
+  add_executable(
+    test_attach
+    cpp_tests/test_attach.cpp
+  )
+  target_link_libraries(test_attach PRIVATE rlprof_core)
+  add_test(NAME test_attach COMMAND test_attach)
 
   add_executable(
     test_parser
@@ -186,6 +195,13 @@ if(BUILD_TESTING)
   )
   target_link_libraries(test_targets PRIVATE rlprof_core)
   add_test(NAME test_targets COMMAND test_targets)
+
+  add_executable(
+    test_server
+    cpp_tests/test_server.cpp
+  )
+  target_link_libraries(test_server PRIVATE rlprof_core)
+  add_test(NAME test_server COMMAND test_server)
 
   add_executable(
     test_interactive

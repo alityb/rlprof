@@ -12,6 +12,7 @@
 #include <iostream>
 #include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -30,6 +31,7 @@
 #include "rlprof/bench/runner.h"
 #include "rlprof/clock_control.h"
 #include "rlprof/profiler/runner.h"
+#include "rlprof/profiler/server.h"
 #include "rlprof/remote.h"
 #include "rlprof/report.h"
 #include "rlprof/stability.h"
@@ -66,6 +68,8 @@ struct BenchCommandOptions {
   std::int64_t warmup = 20;
   std::int64_t n_iter = 200;
   std::int64_t repeats = 5;
+  double batch_ms_target = 10.0;
+  std::string cuda_graph_replay = "off";
   std::string output = "auto";
   rlprof::RemoteTarget target;
   bool assume_yes = false;
@@ -143,6 +147,17 @@ std::filesystem::path append_repeat_suffix(
     const std::filesystem::path& base,
     std::int64_t repeat_index) {
   const std::string suffix = "_r" + std::to_string(repeat_index);
+  if (base.extension().empty()) {
+    return std::filesystem::path(base.string() + suffix);
+  }
+  return base.parent_path() /
+         (base.stem().string() + suffix + base.extension().string());
+}
+
+std::filesystem::path append_iteration_suffix(
+    const std::filesystem::path& base,
+    std::int64_t iteration_index) {
+  const std::string suffix = "_i" + std::to_string(iteration_index);
   if (base.extension().empty()) {
     return std::filesystem::path(base.string() + suffix);
   }
@@ -350,7 +365,18 @@ rlprof::RemoteTarget resolve_cli_target(const rlprof::RemoteTarget& target) {
   }
   const std::string override =
       target.workdir == rlprof::RemoteTarget{}.workdir ? "" : target.workdir;
-  auto resolved = rlprof::resolve_target(target.host, override);
+  rlprof::RemoteTarget resolved;
+  try {
+    resolved = rlprof::resolve_target(target.host, override);
+  } catch (const std::runtime_error&) {
+    if (override.empty() && target.python_executable.empty() &&
+        target.vllm_executable.empty()) {
+      throw;
+    }
+    resolved.host = target.host;
+    resolved.workdir =
+        override.empty() ? rlprof::RemoteTarget{}.workdir : override;
+  }
   if (!target.python_executable.empty()) {
     resolved.python_executable = target.python_executable;
   }
@@ -409,11 +435,6 @@ tool_python() {
   fi
   py3=$(command -v python3 2>/dev/null || true)
   py=$(command -v python 2>/dev/null || true)
-  if [ -n "$py3" ] && [ -n "$py" ] && [ "$py3" != "$py" ]; then
-    print_row python FAIL "ambiguous defaults: $py3, $py"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-    return
-  fi
   chosen="$py3"
   if [ -z "$chosen" ]; then
     chosen="$py"
@@ -511,6 +532,8 @@ ProfileCommandOptions parse_profile_args(const Args& args) {
   for (std::size_t i = 1; i < args.size(); ++i) {
     if (args[i] == "--model") {
       options.config.model = require_value(args, i, "--model");
+    } else if (args[i] == "--server") {
+      options.config.managed_server_name = require_value(args, i, "--server");
     } else if (args[i] == "--attach") {
       options.config.attach_server = require_value(args, i, "--attach");
     } else if (args[i] == "--attach-pid") {
@@ -556,20 +579,139 @@ ProfileCommandOptions parse_profile_args(const Args& args) {
   return options;
 }
 
+void append_profile_invocation_args(
+    Args& args,
+    const ProfileCommandOptions& options,
+    bool include_repeat,
+    const std::string& output_override = "") {
+  if (!options.config.managed_server_name.empty()) {
+    args.insert(args.end(), {"--server", options.config.managed_server_name});
+  } else if (!options.config.attach_server.empty()) {
+    args.insert(args.end(), {"--attach", options.config.attach_server});
+  } else {
+    args.insert(args.end(), {"--model", options.config.model});
+  }
+  if (options.config.attach_pid > 0) {
+    args.insert(
+        args.end(),
+        {"--attach-pid", std::to_string(options.config.attach_pid)});
+  }
+  args.insert(args.end(), {"--prompts", std::to_string(options.config.prompts)});
+  args.insert(args.end(), {"--rollouts", std::to_string(options.config.rollouts)});
+  args.insert(
+      args.end(), {"--min-tokens", std::to_string(options.config.min_tokens)});
+  args.insert(
+      args.end(), {"--max-tokens", std::to_string(options.config.max_tokens)});
+  args.insert(
+      args.end(), {"--input-len", std::to_string(options.config.input_len)});
+  args.insert(args.end(), {"--port", std::to_string(options.config.port)});
+  args.insert(args.end(), {"--tp", std::to_string(options.config.tp)});
+  if (!options.config.peer_servers.empty()) {
+    std::ostringstream peers;
+    for (std::size_t i = 0; i < options.config.peer_servers.size(); ++i) {
+      if (i > 0) {
+        peers << ",";
+      }
+      peers << options.config.peer_servers[i];
+    }
+    args.insert(args.end(), {"--peer-servers", peers.str()});
+  }
+  if (options.config.trust_remote_code) {
+    args.push_back("--trust-remote-code");
+  }
+  if (options.config.discard_first_run) {
+    args.push_back("--discard-first-run");
+  }
+  if (include_repeat) {
+    args.insert(args.end(), {"--repeat", std::to_string(options.repeats)});
+  }
+  if (options.config.start_at_unix_ms > 0) {
+    args.insert(
+        args.end(),
+        {"--start-at-ms", std::to_string(options.config.start_at_unix_ms)});
+  }
+  args.insert(
+      args.end(),
+      {"--output",
+       output_override.empty() ? options.config.output.string() : output_override});
+}
+
+std::pair<std::vector<std::filesystem::path>, std::vector<rlprof::ProfileData>>
+fetch_remote_profile_runs(
+    const rlprof::RemoteTarget& target,
+    const std::filesystem::path& local_output_base,
+    const std::string& remote_output_base,
+    std::int64_t repeats,
+    bool remote_iteration_suffix,
+    bool fetch_nsys_rep,
+    const rlprof::profiler::ProgressCallback& progress) {
+  std::vector<std::future<rlprof::ProfileData>> fetch_futures;
+  fetch_futures.reserve(static_cast<std::size_t>(repeats));
+  for (std::int64_t run_index = 1; run_index <= repeats; ++run_index) {
+    const std::filesystem::path local_db_path =
+        repeats == 1
+            ? with_extension_local(local_output_base, ".db")
+            : with_extension_local(append_repeat_suffix(local_output_base, run_index), ".db");
+    const std::string remote_db_path =
+        repeats == 1
+            ? with_extension(remote_output_base, ".db")
+            : with_extension(
+                  remote_iteration_suffix
+                      ? append_iteration_suffix(remote_output_base, run_index)
+                      : append_repeat_suffix(remote_output_base, run_index),
+                  ".db");
+    fetch_futures.push_back(std::async(
+        std::launch::async,
+        [target, local_db_path, remote_db_path, fetch_nsys_rep]() {
+          fetch_remote_profile_artifacts(
+              target, local_db_path, remote_db_path, fetch_nsys_rep);
+          return rlprof::load_profile(local_db_path);
+        }));
+  }
+
+  std::vector<std::filesystem::path> db_paths;
+  std::vector<rlprof::ProfileData> profiles;
+  db_paths.reserve(static_cast<std::size_t>(repeats));
+  profiles.reserve(static_cast<std::size_t>(repeats));
+  for (std::int64_t run_index = 1; run_index <= repeats; ++run_index) {
+    const std::filesystem::path local_db_path =
+        repeats == 1
+            ? with_extension_local(local_output_base, ".db")
+            : with_extension_local(append_repeat_suffix(local_output_base, run_index), ".db");
+    notify_progress(
+        progress, "Fetching remote artifacts for run " + std::to_string(run_index) + "...");
+    profiles.push_back(fetch_futures[static_cast<std::size_t>(run_index - 1)].get());
+    db_paths.push_back(local_db_path);
+  }
+  return {db_paths, profiles};
+}
+
 std::string run_profile_command(
     const ProfileCommandOptions& options,
     const rlprof::profiler::ProgressCallback& progress = {}) {
   auto effective_options = options;
   effective_options.target = resolve_cli_target(effective_options.target);
   if (effective_options.config.model.empty()) {
-    if (effective_options.config.attach_server.empty()) {
+    if (effective_options.config.attach_server.empty() &&
+        effective_options.config.managed_server_name.empty()) {
       throw std::runtime_error("--model is required");
     }
-    effective_options.config.model = "attached-server";
+    if (!effective_options.config.managed_server_name.empty()) {
+      effective_options.config.model =
+          rlprof::profiler::load_managed_server(
+              effective_options.config.managed_server_name)
+              .model;
+    } else {
+      effective_options.config.model = "attached-server";
+    }
   }
 
   if (effective_options.repeats <= 0) {
     throw std::runtime_error("--repeat must be > 0");
+  }
+  if (!effective_options.config.managed_server_name.empty() &&
+      rlprof::has_remote_target(effective_options.target)) {
+    throw std::runtime_error("--server is currently local-only and cannot be combined with --target");
   }
   if (rlprof::has_remote_target(effective_options.target)) {
     if (!effective_options.config.attach_server.empty() &&
@@ -589,51 +731,22 @@ std::string run_profile_command(
     const std::string remote_output_base =
         rlprof::remote_join(effective_options.target, local_output_base);
 
-    Args remote_args = {"profile"};
-    if (!effective_options.config.attach_server.empty()) {
+    const bool use_fast_remote_repeat =
+        effective_options.repeats > 1 &&
+        (effective_options.config.attach_server.empty() ||
+         effective_options.config.attach_pid > 0) &&
+        effective_options.config.start_at_unix_ms == 0;
+    Args remote_args = {use_fast_remote_repeat ? "soak-profile" : "profile"};
+    append_profile_invocation_args(
+        remote_args,
+        effective_options,
+        !use_fast_remote_repeat,
+        remote_output_base);
+    if (use_fast_remote_repeat) {
       remote_args.insert(
           remote_args.end(),
-          {"--attach", effective_options.config.attach_server});
-    } else {
-      remote_args.insert(
-          remote_args.end(),
-          {"--model", effective_options.config.model});
+          {"--iterations", std::to_string(effective_options.repeats)});
     }
-    if (effective_options.config.attach_pid > 0) {
-      remote_args.insert(
-          remote_args.end(),
-          {"--attach-pid", std::to_string(effective_options.config.attach_pid)});
-    }
-    remote_args.insert(remote_args.end(), {"--prompts", std::to_string(effective_options.config.prompts)});
-    remote_args.insert(remote_args.end(), {"--rollouts", std::to_string(effective_options.config.rollouts)});
-    remote_args.insert(remote_args.end(), {"--min-tokens", std::to_string(effective_options.config.min_tokens)});
-    remote_args.insert(remote_args.end(), {"--max-tokens", std::to_string(effective_options.config.max_tokens)});
-    remote_args.insert(remote_args.end(), {"--input-len", std::to_string(effective_options.config.input_len)});
-    remote_args.insert(remote_args.end(), {"--port", std::to_string(effective_options.config.port)});
-    remote_args.insert(remote_args.end(), {"--tp", std::to_string(effective_options.config.tp)});
-    if (!effective_options.config.peer_servers.empty()) {
-      std::ostringstream peers;
-      for (std::size_t i = 0; i < effective_options.config.peer_servers.size(); ++i) {
-        if (i > 0) {
-          peers << ",";
-        }
-        peers << effective_options.config.peer_servers[i];
-      }
-      remote_args.insert(remote_args.end(), {"--peer-servers", peers.str()});
-    }
-    if (effective_options.config.trust_remote_code) {
-      remote_args.push_back("--trust-remote-code");
-    }
-    if (effective_options.config.discard_first_run) {
-      remote_args.push_back("--discard-first-run");
-    }
-      remote_args.insert(remote_args.end(), {"--repeat", std::to_string(effective_options.repeats)});
-    if (effective_options.config.start_at_unix_ms > 0) {
-      remote_args.insert(
-          remote_args.end(),
-          {"--start-at-ms", std::to_string(effective_options.config.start_at_unix_ms)});
-    }
-    remote_args.insert(remote_args.end(), {"--output", remote_output_base});
 
     notify_progress(progress, "Running remote profile on " + effective_options.target.host + "...");
     try {
@@ -651,39 +764,17 @@ std::string run_profile_command(
           std::string(exc.what()) + "\n\nremote vLLM log tail:\n" + tail);
     }
 
-    std::vector<std::future<rlprof::ProfileData>> fetch_futures;
-    fetch_futures.reserve(static_cast<std::size_t>(effective_options.repeats));
-    for (std::int64_t run_index = 1; run_index <= effective_options.repeats; ++run_index) {
-      const std::filesystem::path local_db_path =
-          effective_options.repeats == 1
-              ? with_extension_local(local_output_base, ".db")
-              : with_extension_local(append_repeat_suffix(local_output_base, run_index), ".db");
-      const std::string remote_db_path =
-          effective_options.repeats == 1
-              ? with_extension(remote_output_base, ".db")
-              : with_extension(append_repeat_suffix(remote_output_base, run_index), ".db");
-      fetch_futures.push_back(std::async(
-          std::launch::async,
-          [target = effective_options.target,
-           local_db_path,
-           remote_db_path,
-           fetch_nsys_rep = effective_options.fetch_nsys_rep]() {
-            fetch_remote_profile_artifacts(target, local_db_path, remote_db_path, fetch_nsys_rep);
-            return rlprof::load_profile(local_db_path);
-          }));
-    }
-
     std::ostringstream output;
-    std::vector<rlprof::ProfileData> profiles;
-    profiles.reserve(static_cast<std::size_t>(effective_options.repeats));
-    for (std::int64_t run_index = 1; run_index <= effective_options.repeats; ++run_index) {
-      const std::filesystem::path local_db_path =
-          effective_options.repeats == 1
-              ? with_extension_local(local_output_base, ".db")
-              : with_extension_local(append_repeat_suffix(local_output_base, run_index), ".db");
-      notify_progress(progress, "Fetching remote artifacts for run " + std::to_string(run_index) + "...");
-      profiles.push_back(fetch_futures[static_cast<std::size_t>(run_index - 1)].get());
-      output << local_db_path.string() << "\n";
+    const auto [db_paths, profiles] = fetch_remote_profile_runs(
+        effective_options.target,
+        local_output_base,
+        remote_output_base,
+        effective_options.repeats,
+        use_fast_remote_repeat,
+        effective_options.fetch_nsys_rep,
+        progress);
+    for (const auto& db_path : db_paths) {
+      output << db_path.string() << "\n";
     }
 
     const auto& final_profile = profiles.back();
@@ -711,26 +802,18 @@ std::string run_profile_command(
     return output.str();
   }
 
-  const std::filesystem::path output_base = repeat_output_base(effective_options.config);
-  std::vector<std::filesystem::path> db_paths;
+  if (!effective_options.config.attach_server.empty() &&
+      effective_options.config.attach_pid <= 0) {
+    throw std::runtime_error(
+        "profile --repeat with attach mode still uses single-run profiling only");
+  }
+  const auto results = rlprof::profiler::run_soak_profile(
+      effective_options.config, effective_options.repeats, 0, progress);
   std::vector<rlprof::ProfileData> profiles;
-  db_paths.reserve(static_cast<std::size_t>(effective_options.repeats));
-  profiles.reserve(static_cast<std::size_t>(effective_options.repeats));
-
-  for (std::int64_t run_index = 1; run_index <= effective_options.repeats; ++run_index) {
-    auto run_config = effective_options.config;
-    run_config.output = append_repeat_suffix(output_base, run_index);
-    const auto run_progress = [&](const std::string& status) {
-      if (progress) {
-        progress(
-            "[run " + std::to_string(run_index) + "/" + std::to_string(effective_options.repeats) +
-            "] " + status);
-      }
-    };
-    const auto result = rlprof::profiler::run_profile(run_config, run_progress);
-    db_paths.push_back(result.db_path);
-    profiles.push_back(rlprof::load_profile(result.db_path));
+  profiles.reserve(results.size());
+  for (const auto& result : results) {
     output << result.db_path << "\n";
+    profiles.push_back(rlprof::load_profile(result.db_path));
   }
 
   const auto& final_profile = profiles.back();
@@ -753,8 +836,8 @@ int handle_profile(const Args& args) {
   auto options = parse_profile_args(args);
   options.target = resolve_cli_target(options.target);
   if (options.show_help) {
-    std::cout << "Usage: rlprof profile (--model MODEL | --attach URL) [options] [--repeat N]\n"
-              << "       optional: --attach URL --attach-pid PID --peer-servers URL1,URL2,...\n"
+    std::cout << "Usage: rlprof profile (--model MODEL | --server NAME | --attach URL) [options] [--repeat N]\n"
+              << "       optional: --server NAME --attach URL --attach-pid PID --peer-servers URL1,URL2,...\n"
               << "                 --target HOST --target-workdir DIR\n"
               << "       flags: --discard-first-run --fetch-nsys-rep --yes\n";
     return 0;
@@ -950,14 +1033,17 @@ int handle_cleanup(const Args& args) {
 
 int handle_cluster_profile(const Args& args) {
   if (args.size() > 1 && args[1] == "--help") {
-    std::cout << "Usage: rlprof cluster-profile --targets T1,T2 [profile options] --output BASE\n";
+    std::cout << "Usage: rlprof cluster-profile --targets T1,T2 [profile options] --output BASE [--allow-duplicate-hosts]\n";
     return 0;
   }
   std::string targets_csv;
+  bool allow_duplicate_hosts = false;
   Args profile_args = {"profile"};
   for (std::size_t i = 1; i < args.size(); ++i) {
     if (args[i] == "--targets") {
       targets_csv = require_value(args, i, "--targets");
+    } else if (args[i] == "--allow-duplicate-hosts") {
+      allow_duplicate_hosts = true;
     } else {
       profile_args.push_back(args[i]);
     }
@@ -980,18 +1066,25 @@ int handle_cluster_profile(const Args& args) {
   std::vector<ProfileCommandOptions> run_options_list;
   std::vector<std::int64_t> target_now_ms;
   std::map<std::string, int> host_occurrences;
+  std::set<std::string> distinct_hosts;
   run_options_list.reserve(targets.size());
   target_now_ms.reserve(targets.size());
   for (const auto& target_spec : targets) {
     auto run_options = options;
-    run_options.target = rlprof::resolve_target(target_spec);
+    run_options.target.host = target_spec;
+    run_options.target = resolve_cli_target(run_options.target);
     const int host_index = host_occurrences[run_options.target.host]++;
+    distinct_hosts.insert(run_options.target.host);
     run_options.config.port = options.config.port + host_index;
     run_options.config.output =
         options.config.output.string() + "_" + sanitize_label(target_spec);
     target_now_ms.push_back(std::stoll(trim(
         run_command_capture(rlprof::remote_epoch_ms_command(run_options.target)))));
     run_options_list.push_back(run_options);
+  }
+  if (!allow_duplicate_hosts && distinct_hosts.size() != targets.size()) {
+    throw std::runtime_error(
+        "cluster-profile requires distinct target hosts. Use --allow-duplicate-hosts only for loopback testing.");
   }
 
   const auto [min_it, max_it] =
@@ -1023,6 +1116,8 @@ int handle_cluster_profile(const Args& args) {
   aggregate.meta["cluster_synchronized_start"] = "true";
   aggregate.meta["cluster_start_at_unix_ms"] = std::to_string(start_at_ms);
   aggregate.meta["cluster_clock_skew_ms"] = std::to_string(*max_it - *min_it);
+  aggregate.meta["cluster_distinct_host_count"] = std::to_string(distinct_hosts.size());
+  aggregate.meta["cluster_duplicate_hosts_allowed"] = allow_duplicate_hosts ? "true" : "false";
   const std::filesystem::path aggregate_path =
       options.config.output.string() + "_aggregate.db";
   aggregate.meta["artifact_db_path"] = aggregate_path.string();
@@ -1062,23 +1157,96 @@ int handle_soak_profile(const Args& args) {
     throw std::runtime_error("soak-profile requires --output BASE");
   }
 
-  for (int i = 1; i <= iterations; ++i) {
-    auto run_options = options;
-    run_options.config.output =
-        options.config.output.string() + "_i" + std::to_string(i);
-    std::cout << run_profile_command(run_options);
-    std::filesystem::path db_path = run_options.config.output;
-    db_path.replace_extension(".db");
+  options.target = resolve_cli_target(options.target);
+  if (rlprof::has_remote_target(options.target)) {
+    const std::filesystem::path local_output_base = repeat_output_base(options.config);
+    const std::string remote_output_base =
+        rlprof::remote_join(options.target, local_output_base);
+    Args remote_args = {"soak-profile"};
+    append_profile_invocation_args(remote_args, options, false, remote_output_base);
+    remote_args.insert(remote_args.end(), {"--iterations", std::to_string(iterations)});
+    if (pause_sec > 0) {
+      remote_args.insert(remote_args.end(), {"--pause-sec", std::to_string(pause_sec)});
+    }
     if (validate_each) {
-      const auto checks = rlprof::validate_profile(db_path);
-      for (const auto& check : checks) {
-        if (check.status == rlprof::ValidationStatus::kFail) {
-          throw std::runtime_error("soak validation failed for " + db_path.string() + ": " + check.name);
+      remote_args.push_back("--validate-each");
+    }
+    notify_progress(
+        {},
+        "Running remote soak profile on " + options.target.host + "...");
+    try {
+      run_command_capture(rlprof::remote_cli_command(options.target, remote_args));
+    } catch (const std::exception& exc) {
+      const std::string tail = try_run_command_capture(
+          rlprof::remote_tail_command(
+              options.target,
+              with_suffix_remote(with_extension(remote_output_base, ".db"), "_server.log"),
+              120));
+      if (tail.empty()) {
+        throw;
+      }
+      throw std::runtime_error(
+          std::string(exc.what()) + "\n\nremote vLLM log tail:\n" + tail);
+    }
+    const auto [db_paths, _profiles] = fetch_remote_profile_runs(
+        options.target,
+        local_output_base,
+        remote_output_base,
+        iterations,
+        true,
+        options.fetch_nsys_rep,
+        {});
+    for (const auto& db_path : db_paths) {
+      std::cout << db_path.string() << "\n";
+      if (validate_each) {
+        const auto checks = rlprof::validate_profile(db_path);
+        for (const auto& check : checks) {
+          if (check.status == rlprof::ValidationStatus::kFail) {
+            throw std::runtime_error(
+                "soak validation failed for " + db_path.string() + ": " + check.name);
+          }
         }
       }
     }
-    if (pause_sec > 0 && i < iterations) {
-      std::this_thread::sleep_for(std::chrono::seconds(pause_sec));
+    return 0;
+  }
+
+  if (!options.config.attach_server.empty() && options.config.attach_pid <= 0) {
+    for (int i = 1; i <= iterations; ++i) {
+      auto run_options = options;
+      run_options.config.output =
+          options.config.output.string() + "_i" + std::to_string(i);
+      std::cout << run_profile_command(run_options);
+      std::filesystem::path db_path = run_options.config.output;
+      db_path.replace_extension(".db");
+      if (validate_each) {
+        const auto checks = rlprof::validate_profile(db_path);
+        for (const auto& check : checks) {
+          if (check.status == rlprof::ValidationStatus::kFail) {
+            throw std::runtime_error(
+                "soak validation failed for " + db_path.string() + ": " + check.name);
+          }
+        }
+      }
+      if (pause_sec > 0 && i < iterations) {
+        std::this_thread::sleep_for(std::chrono::seconds(pause_sec));
+      }
+    }
+    return 0;
+  }
+
+  const auto results =
+      rlprof::profiler::run_soak_profile(options.config, iterations, pause_sec, {});
+  for (const auto& result : results) {
+    std::cout << result.db_path.string() << "\n";
+    if (validate_each) {
+      const auto checks = rlprof::validate_profile(result.db_path);
+      for (const auto& check : checks) {
+        if (check.status == rlprof::ValidationStatus::kFail) {
+          throw std::runtime_error(
+              "soak validation failed for " + result.db_path.string() + ": " + check.name);
+        }
+      }
     }
   }
   return 0;
@@ -1112,6 +1280,88 @@ int handle_doctor(const Args& args) {
   }
   std::cout << rlprof::render_doctor_report(rlprof::run_doctor(), stdout_supports_color());
   return 0;
+}
+
+int handle_server(const Args& args) {
+  if (args.size() == 1 || (args.size() > 1 && args[1] == "--help")) {
+    std::cout << "Usage: rlprof server <start|stop|list|show|prune> ...\n";
+    return 0;
+  }
+
+  const std::string action = args[1];
+  if (action == "list") {
+    std::cout << rlprof::profiler::render_managed_servers(
+        rlprof::profiler::list_managed_servers());
+    return 0;
+  }
+
+  if (action == "show") {
+    if (args.size() < 3) {
+      throw std::runtime_error("server show requires NAME");
+    }
+    const auto state = rlprof::profiler::find_managed_server(args[2]);
+    if (!state.has_value()) {
+      throw std::runtime_error("unknown managed server: " + args[2]);
+    }
+    std::cout << "name: " << state->name << "\n";
+    std::cout << "model: " << state->model << "\n";
+    std::cout << "url: " << state->server_url << "\n";
+    std::cout << "port: " << state->port << "\n";
+    std::cout << "tp: " << state->tp << "\n";
+    std::cout << "max_model_len: " << state->max_model_len << "\n";
+    std::cout << "session: " << state->session_name << "\n";
+    std::cout << "pid: " << state->pid << "\n";
+    std::cout << "ready: " << (rlprof::profiler::managed_server_ready(*state) ? "yes" : "no") << "\n";
+    std::cout << "log: " << state->log_path.string() << "\n";
+    return 0;
+  }
+
+  if (action == "start") {
+    rlprof::profiler::ManagedServerConfig config;
+    for (std::size_t i = 2; i < args.size(); ++i) {
+      if (args[i] == "--name") {
+        config.name = require_value(args, i, "--name");
+      } else if (args[i] == "--model") {
+        config.model = require_value(args, i, "--model");
+      } else if (args[i] == "--port") {
+        config.port = std::stoll(require_value(args, i, "--port"));
+      } else if (args[i] == "--tp") {
+        config.tp = std::stoll(require_value(args, i, "--tp"));
+      } else if (args[i] == "--max-model-len") {
+        config.max_model_len = std::stoll(require_value(args, i, "--max-model-len"));
+      } else if (args[i] == "--trust-remote-code") {
+        config.trust_remote_code = true;
+      } else if (args[i] == "--startup-timeout-s") {
+        config.startup_timeout_s = std::stoll(require_value(args, i, "--startup-timeout-s"));
+      }
+    }
+    const auto state = rlprof::profiler::start_managed_server(config);
+    std::cout << state.name << "\n";
+    std::cout << state.server_url << "\n";
+    return 0;
+  }
+
+  if (action == "stop") {
+    if (args.size() < 3) {
+      throw std::runtime_error("server stop requires NAME");
+    }
+    const auto state = rlprof::profiler::find_managed_server(args[2]);
+    if (!state.has_value()) {
+      throw std::runtime_error("unknown managed server: " + args[2]);
+    }
+    rlprof::profiler::stop_managed_server(*state);
+    std::cout << "Stopped " << state->name << "\n";
+    return 0;
+  }
+
+  if (action == "prune") {
+    const auto removed = rlprof::profiler::prune_stale_managed_servers();
+    std::cout << "Pruned " << removed << " stale managed server"
+              << (removed == 1 ? "" : "s") << "\n";
+    return 0;
+  }
+
+  throw std::runtime_error("unknown server action: " + action);
 }
 
 int handle_target(const Args& args) {
@@ -1196,13 +1446,13 @@ int handle_target(const Args& args) {
         vllm_executable = require_value(args, i, "--vllm");
       }
     }
-    auto target = rlprof::resolve_target(args[2], workdir);
-    if (!python_executable.empty()) {
-      target.python_executable = python_executable;
-    }
-    if (!vllm_executable.empty()) {
-      target.vllm_executable = vllm_executable;
-    }
+    rlprof::RemoteTarget target{
+        .host = args[2],
+        .workdir = workdir.empty() ? rlprof::RemoteTarget{}.workdir : workdir,
+        .python_executable = python_executable,
+        .vllm_executable = vllm_executable,
+    };
+    target = resolve_cli_target(target);
     try {
       std::cout << run_command_capture(
           rlprof::remote_shell_command(target, remote_bootstrap_check_script()));
@@ -1396,7 +1646,9 @@ std::string bench_helper_command(
     const std::string& dtype,
     std::int64_t warmup,
     std::int64_t n_iter,
-    std::int64_t repeats) {
+    std::int64_t repeats,
+    double batch_ms_target,
+    const std::string& cuda_graph_replay) {
   const char* configured_python = std::getenv("RLPROF_PYTHON_EXECUTABLE");
   const std::string python =
       configured_python != nullptr && std::string(configured_python).size() > 0
@@ -1408,7 +1660,10 @@ std::string bench_helper_command(
         " --dtype " + shell_escape(dtype) +
         " --warmup " + shell_escape(std::to_string(warmup)) +
         " --n-iter " + shell_escape(std::to_string(n_iter)) +
-         " --repeats " + shell_escape(std::to_string(repeats)) + " 2>&1";
+         " --repeats " + shell_escape(std::to_string(repeats)) +
+         " --batch-ms-target " + shell_escape(std::to_string(batch_ms_target)) +
+         " --cuda-graph-replay " + shell_escape(cuda_graph_replay) +
+         " 2>&1";
 }
 
 bool gpu_bench_available() {
@@ -1445,6 +1700,10 @@ BenchCommandOptions parse_bench_args(const Args& args) {
       options.n_iter = std::stoll(require_value(args, i, "--n-iter"));
     } else if (args[i] == "--repeats") {
       options.repeats = std::stoll(require_value(args, i, "--repeats"));
+    } else if (args[i] == "--batch-ms-target") {
+      options.batch_ms_target = std::stod(require_value(args, i, "--batch-ms-target"));
+    } else if (args[i] == "--cuda-graph-replay") {
+      options.cuda_graph_replay = require_value(args, i, "--cuda-graph-replay");
     } else if (args[i] == "--output") {
       options.output = require_value(args, i, "--output");
     } else if (args[i] == "--yes") {
@@ -1487,6 +1746,10 @@ std::string run_bench_command(const BenchCommandOptions& options) {
         std::to_string(effective_options.n_iter),
         "--repeats",
         std::to_string(effective_options.repeats),
+        "--batch-ms-target",
+        std::to_string(effective_options.batch_ms_target),
+        "--cuda-graph-replay",
+        effective_options.cuda_graph_replay,
         "--output",
         remote_output_path,
     };
@@ -1509,7 +1772,9 @@ std::string run_bench_command(const BenchCommandOptions& options) {
             effective_options.dtype,
             effective_options.warmup,
             effective_options.n_iter,
-            effective_options.repeats));
+            effective_options.repeats,
+            effective_options.batch_ms_target,
+            effective_options.cuda_graph_replay));
     const auto output = rlprof::bench::parse_bench_json(raw_json);
     const auto output_path =
         rlprof::bench::resolve_bench_output_path(effective_options.kernel, effective_options.output);
@@ -1558,6 +1823,7 @@ int handle_bench(const Args& args) {
   if (options.show_help) {
     std::cout << "Usage: rlprof bench --kernel NAME --shapes SPEC [options]\n"
               << "       flags: --yes\n"
+              << "       timing: --batch-ms-target FLOAT --cuda-graph-replay off|on\n"
               << "       remote: --target HOST --target-workdir DIR\n"
               << "       output: --output PATH|auto|none\n";
     return 0;
@@ -1989,17 +2255,20 @@ _rlprof_complete() {
   COMPREPLY=()
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
-  local commands="profile report aggregate bench bench-compare diff export trace artifacts validate traffic doctor target recover lock-clocks unlock-clocks reset-defaults completion help"
+  local commands="profile report aggregate bench bench-compare diff export trace artifacts validate traffic doctor server target recover lock-clocks unlock-clocks reset-defaults completion help"
   if [[ $COMP_CWORD -eq 1 ]]; then
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
     return
   fi
   case "${COMP_WORDS[1]}" in
         profile)
-          COMPREPLY=( $(compgen -W "--model --attach --attach-pid --target --target-workdir --prompts --rollouts --min-tokens --max-tokens --input-len --port --tp --peer-servers --trust-remote-code --discard-first-run --repeat --fetch-nsys-rep --output --yes --help" -- "$cur") )
+          COMPREPLY=( $(compgen -W "--model --server --attach --attach-pid --target --target-workdir --prompts --rollouts --min-tokens --max-tokens --input-len --port --tp --peer-servers --trust-remote-code --discard-first-run --repeat --fetch-nsys-rep --output --yes --help" -- "$cur") )
+          ;;
+        server)
+          COMPREPLY=( $(compgen -W "start stop list show prune --name --model --port --tp --max-model-len --trust-remote-code --startup-timeout-s --help" -- "$cur") )
           ;;
     bench)
-      COMPREPLY=( $(compgen -W "--kernel --target --target-workdir --shapes --dtype --warmup --n-iter --repeats --output --yes --help" -- "$cur") )
+      COMPREPLY=( $(compgen -W "--kernel --target --target-workdir --shapes --dtype --warmup --n-iter --repeats --batch-ms-target --cuda-graph-replay --output --yes --help" -- "$cur") )
       ;;
         aggregate|report|artifacts|trace|validate|bench-compare)
           COMPREPLY=( $(compgen -f -- "$cur") )
@@ -2053,6 +2322,7 @@ _rlprof() {
     'validate:validate stored profile against raw artifacts'
     'traffic:run traffic generator'
     'doctor:check local profiling environment'
+    'server:manage local warm vllm servers'
     'target:manage saved ssh targets'
     'recover:recover remote profile artifacts'
     'lock-clocks:lock GPU clocks'
@@ -2071,10 +2341,13 @@ _rlprof() {
     args)
       case $words[2] in
         profile)
-          _arguments '--model[model name]' '--attach[existing server url]' '--attach-pid[remote process id]' '--target[ssh target host]' '--target-workdir[remote rlprof workdir]' '--prompts[prompt count]' '--rollouts[rollouts per prompt]' '--min-tokens[min output tokens]' '--max-tokens[max output tokens]' '--input-len[input length]' '--port[server port]' '--tp[tensor parallel size]' '--peer-servers[peer endpoints]' '--trust-remote-code[trust remote code]' '--discard-first-run[run and discard a warmup pass]' '--repeat[repeat count]' '--fetch-nsys-rep[copy the remote nsys report locally]' '--output[output path]' '--yes[accept saved defaults]' '--help[show help]'
+          _arguments '--model[model name]' '--server[managed warm server name]' '--attach[existing server url]' '--attach-pid[remote process id; requires nsys PID attach support]' '--target[ssh target host]' '--target-workdir[remote rlprof workdir]' '--prompts[prompt count]' '--rollouts[rollouts per prompt]' '--min-tokens[min output tokens]' '--max-tokens[max output tokens]' '--input-len[input length]' '--port[server port]' '--tp[tensor parallel size]' '--peer-servers[peer endpoints]' '--trust-remote-code[trust remote code]' '--discard-first-run[run and discard a warmup pass]' '--repeat[repeat count]' '--fetch-nsys-rep[copy the remote nsys report locally]' '--output[output path]' '--yes[accept saved defaults]' '--help[show help]'
+          ;;
+        server)
+          _arguments '1:action:(start stop list show prune)' '--name[managed server name]' '--model[model name]' '--port[server port]' '--tp[tensor parallel size]' '--max-model-len[managed server max model length]' '--trust-remote-code[trust remote code]' '--startup-timeout-s[startup timeout seconds]' '--help[show help]'
           ;;
         bench)
-          _arguments '--kernel[kernel name]' '--target[ssh target host]' '--target-workdir[remote rlprof workdir]' '--shapes[shape list]' '--dtype[data type]' '--warmup[warmup iterations]' '--n-iter[timed iterations]' '--repeats[repeat count]' '--output[result output path]' '--yes[accept saved defaults]' '--help[show help]'
+          _arguments '--kernel[kernel name]' '--target[ssh target host]' '--target-workdir[remote rlprof workdir]' '--shapes[shape list]' '--dtype[data type]' '--warmup[warmup iterations]' '--n-iter[timed iterations]' '--repeats[repeat count]' '--batch-ms-target[target milliseconds per timed block]' '--cuda-graph-replay[use CUDA Graph replay]:mode:(off on)' '--output[result output path]' '--yes[accept saved defaults]' '--help[show help]'
           ;;
         aggregate|bench-compare)
           _files
@@ -2115,6 +2388,7 @@ complete -c rlprof -n '__fish_use_subcommand' -a 'artifacts' -d 'view stored art
 complete -c rlprof -n '__fish_use_subcommand' -a 'validate' -d 'validate stored profile against raw artifacts'
 complete -c rlprof -n '__fish_use_subcommand' -a 'traffic' -d 'run traffic generator'
 complete -c rlprof -n '__fish_use_subcommand' -a 'doctor' -d 'check local profiling environment'
+complete -c rlprof -n '__fish_use_subcommand' -a 'server' -d 'manage local warm vllm servers'
 complete -c rlprof -n '__fish_use_subcommand' -a 'target' -d 'manage saved ssh targets'
 complete -c rlprof -n '__fish_use_subcommand' -a 'recover' -d 'recover remote profile artifacts'
 complete -c rlprof -n '__fish_use_subcommand' -a 'lock-clocks' -d 'lock GPU clocks'
@@ -2123,6 +2397,7 @@ complete -c rlprof -n '__fish_use_subcommand' -a 'reset-defaults' -d 'clear save
 complete -c rlprof -n '__fish_use_subcommand' -a 'completion' -d 'print shell completion'
 complete -c rlprof -n '__fish_use_subcommand' -a 'help' -d 'show help'
 complete -c rlprof -n '__fish_seen_subcommand_from profile' -l model
+complete -c rlprof -n '__fish_seen_subcommand_from profile' -l server
 complete -c rlprof -n '__fish_seen_subcommand_from profile' -l attach
 complete -c rlprof -n '__fish_seen_subcommand_from profile' -l attach-pid
 complete -c rlprof -n '__fish_seen_subcommand_from profile' -l target
@@ -2149,11 +2424,21 @@ complete -c rlprof -n '__fish_seen_subcommand_from bench' -l dtype -a 'bf16 fp16
 complete -c rlprof -n '__fish_seen_subcommand_from bench' -l warmup
 complete -c rlprof -n '__fish_seen_subcommand_from bench' -l n-iter
 complete -c rlprof -n '__fish_seen_subcommand_from bench' -l repeats
+complete -c rlprof -n '__fish_seen_subcommand_from bench' -l batch-ms-target
+complete -c rlprof -n '__fish_seen_subcommand_from bench' -l cuda-graph-replay -a 'off on'
 complete -c rlprof -n '__fish_seen_subcommand_from bench' -l output
 complete -c rlprof -n '__fish_seen_subcommand_from bench' -l yes
 complete -c rlprof -n '__fish_seen_subcommand_from export' -l format -a 'csv json'
 complete -c rlprof -n '__fish_seen_subcommand_from doctor' -l target
 complete -c rlprof -n '__fish_seen_subcommand_from doctor' -l target-workdir
+complete -c rlprof -n '__fish_seen_subcommand_from server' -a 'start stop list show prune'
+complete -c rlprof -n '__fish_seen_subcommand_from server' -l name
+complete -c rlprof -n '__fish_seen_subcommand_from server' -l model
+complete -c rlprof -n '__fish_seen_subcommand_from server' -l port
+complete -c rlprof -n '__fish_seen_subcommand_from server' -l tp
+complete -c rlprof -n '__fish_seen_subcommand_from server' -l max-model-len
+complete -c rlprof -n '__fish_seen_subcommand_from server' -l trust-remote-code
+complete -c rlprof -n '__fish_seen_subcommand_from server' -l startup-timeout-s
 complete -c rlprof -n '__fish_seen_subcommand_from target' -a 'add list remove show bootstrap'
 complete -c rlprof -n '__fish_seen_subcommand_from target' -l host
 complete -c rlprof -n '__fish_seen_subcommand_from target' -l workdir
@@ -2187,10 +2472,11 @@ void print_help() {
   std::cout << "Usage: rlprof <command> [options]\n\n"
             << "Commands:\n"
             << "  version\n"
-            << "  profile (--model MODEL | --attach URL) [options] [--repeat N]\n"
-            << "    optional: --attach URL --attach-pid PID --target HOST --target-workdir DIR\n"
+            << "  profile (--model MODEL | --server NAME | --attach URL) [options] [--repeat N]\n"
+            << "    optional: --server NAME --attach URL --attach-pid PID --target HOST --target-workdir DIR\n"
             << "              --peer-servers URL1,URL2,... --discard-first-run --yes\n"
-            << "  cluster-profile --targets T1,T2 [profile options] --output base\n"
+            << "  server <start|stop|list|show|prune> ...\n"
+            << "  cluster-profile --targets T1,T2 [profile options] --output base [--allow-duplicate-hosts]\n"
             << "  soak-profile [profile options] --iterations N --output base [--pause-sec N] [--validate-each]\n"
             << "  lock-clocks [--freq MHZ]\n"
             << "  unlock-clocks\n"
@@ -2302,6 +2588,7 @@ int main(int argc, char** argv) {
 
     if (command == "profile" &&
         !has_flag(args, "--model") &&
+        !has_flag(args, "--server") &&
         !has_flag(args, "--attach") &&
         !has_flag(args, "--help")) {
       const auto config = profile_interactive_defaults(args);
@@ -2399,6 +2686,10 @@ int main(int argc, char** argv) {
 
     if (command == "doctor") {
       return handle_doctor(args);
+    }
+
+    if (command == "server") {
+      return handle_server(args);
     }
 
     if (command == "target") {

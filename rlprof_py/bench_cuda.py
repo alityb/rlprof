@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import subprocess
 from dataclasses import dataclass
+from typing import Callable
 
 import torch
 
@@ -37,6 +39,8 @@ class BenchResult:
     correctness_failures: list[str]
     timing_warnings: list[str]
     environment_warnings: list[str]
+    batch_invocations: int
+    cuda_graph_replay: bool
 
 
 @dataclass
@@ -63,6 +67,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--n-iter", type=int, default=200)
     parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument("--batch-ms-target", type=float, default=10.0)
+    parser.add_argument("--cuda-graph-replay", choices=("off", "on"), default="off")
     return parser.parse_args()
 
 
@@ -140,26 +146,60 @@ def query_gpu_snapshot() -> GpuSnapshot | None:
     )
 
 
-def measure_once(fn, warmup: int, n_iter: int) -> list[float]:
+def measure_block_ms(fn, launches: int, start: torch.cuda.Event, end: torch.cuda.Event) -> float:
+    start.record()
+    for _ in range(launches):
+        fn()
+    end.record()
+    end.synchronize()
+    return start.elapsed_time(end)
+
+
+def determine_batch_invocations(
+    fn,
+    target_ms: float,
+    start: torch.cuda.Event,
+    end: torch.cuda.Event,
+) -> int:
+    if target_ms <= 0.0:
+        return 1
+    samples: list[float] = []
+    for _ in range(3):
+        torch.cuda.synchronize()
+        samples.append(measure_block_ms(fn, 1, start, end))
+    representative_ms = max(statistics.median(samples), 1e-3)
+    return max(1, min(4096, int(math.ceil(target_ms / representative_ms))))
+
+
+def measure_once(fn, warmup: int, n_iter: int, batch_invocations: int) -> list[float]:
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
 
     times: list[float] = []
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
     for _ in range(n_iter):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        fn()
-        end.record()
-        end.synchronize()
-        times.append(start.elapsed_time(end))
+        elapsed_ms = measure_block_ms(fn, batch_invocations, start, end)
+        times.append(elapsed_ms / batch_invocations)
     return times
 
 
 def prime_implementation(fn) -> None:
     fn()
     torch.cuda.synchronize()
+
+
+def maybe_create_cuda_graph(fn: Callable[[], object], mode: str) -> tuple[Callable[[], object], bool]:
+    if mode == "off":
+        return fn, False
+
+    graph = torch.cuda.CUDAGraph()
+    torch.cuda.synchronize()
+    with torch.cuda.graph(graph):
+        fn()
+    torch.cuda.synchronize()
+    return graph.replay, True
 
 
 def max_abs_error(
@@ -222,6 +262,8 @@ def benchmark(
     warmup: int,
     n_iter: int,
     repeats: int,
+    batch_ms_target: float,
+    cuda_graph_replay: str,
 ) -> BenchResult:
     dtype = dtype_from_name(dtype_name)
     validation_passed, validation_max_abs_error = validate_implementation(
@@ -234,12 +276,31 @@ def benchmark(
     all_times: list[float] = []
     repeat_means: list[float] = []
     snapshots: list[GpuSnapshot] = []
+    batch_invocations = 1
+    cuda_graph_used = False
+    environment_warnings: list[str] = []
 
     for _ in range(repeats):
         prime_state = spec.setup(shape, dtype)
         prime_implementation(lambda: implementation(prime_state))
         state = spec.setup(shape, dtype)
-        times = measure_once(lambda: implementation(state), warmup, n_iter)
+        fn = lambda: implementation(state)
+        try:
+            timed_fn, graph_used = maybe_create_cuda_graph(fn, cuda_graph_replay)
+        except Exception as exc:
+            if cuda_graph_replay == "on":
+                raise
+            environment_warnings.append(f"cuda graph replay unavailable ({exc})")
+            timed_fn = fn
+            graph_used = False
+        cuda_graph_used = cuda_graph_used or graph_used
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        current_batch_invocations = determine_batch_invocations(
+            timed_fn, batch_ms_target, start, end
+        )
+        batch_invocations = max(batch_invocations, current_batch_invocations)
+        times = measure_once(timed_fn, warmup, n_iter, current_batch_invocations)
         all_times.extend(times)
         repeat_means.append(sum(times) / len(times))
         snapshot = query_gpu_snapshot()
@@ -251,7 +312,6 @@ def benchmark(
     repeat_cv_pct = 0.0 if avg_ms == 0 else (stddev_ms / avg_ms) * 100.0
     correctness_failures: list[str] = []
     timing_warnings: list[str] = []
-    environment_warnings: list[str] = []
 
     if repeat_cv_pct > 15.0:
         timing_warnings.append(f"repeat cv exceeded threshold ({repeat_cv_pct:.1f}%)")
@@ -310,6 +370,8 @@ def benchmark(
         correctness_failures=correctness_failures,
         timing_warnings=timing_warnings,
         environment_warnings=environment_warnings,
+        batch_invocations=batch_invocations,
+        cuda_graph_replay=cuda_graph_used,
     )
 
 
@@ -361,6 +423,8 @@ def render_json(results: list[BenchResult], gpu_snapshot: GpuSnapshot | None) ->
                 "timing_warning": result.has_timing_warning,
                 "environment_warning": result.has_environment_warning,
                 "unstable": result.unstable,
+                "batch_invocations": result.batch_invocations,
+                "cuda_graph_replay": result.cuda_graph_replay,
             }
             for result in results
         ],
@@ -404,6 +468,8 @@ def main() -> None:
                         warmup=args.warmup,
                         n_iter=args.n_iter,
                         repeats=args.repeats,
+                        batch_ms_target=args.batch_ms_target,
+                        cuda_graph_replay=args.cuda_graph_replay,
                     )
                 )
 

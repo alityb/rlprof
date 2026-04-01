@@ -16,6 +16,7 @@ struct ProfileConfig {
   std::string model;
   std::string attach_server;
   std::int64_t attach_pid = 0;
+  std::string managed_server_name;
   std::int64_t prompts = 128;
   std::int64_t rollouts = 8;
   std::int64_t max_tokens = 4096;
@@ -35,6 +36,7 @@ struct ProfileConfig {
 struct ProfileRunResult {
   std::filesystem::path db_path;
   std::filesystem::path nsys_sqlite_path;
+  std::filesystem::path nsys_rep_path;
   std::map<std::string, std::string> meta;
   std::vector<KernelRecord> kernels;
   std::vector<MetricSample> metrics;
@@ -45,6 +47,12 @@ using ProgressCallback = std::function<void(const std::string&)>;
 
 ProfileRunResult run_profile(
     const ProfileConfig& config,
+    ProgressCallback progress = {});
+
+std::vector<ProfileRunResult> run_soak_profile(
+    const ProfileConfig& config,
+    std::int64_t iterations,
+    std::int64_t pause_sec,
     ProgressCallback progress = {});
 
 }  // namespace rlprof::profiler

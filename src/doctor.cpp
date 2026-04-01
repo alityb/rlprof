@@ -108,38 +108,25 @@ RuntimeToolInfo resolve_tool(
   }
 
   for (const auto& tier : candidate_tiers) {
-    std::set<std::string> resolved_paths;
     for (const auto& [candidate, path_lookup] : tier) {
       const auto resolved = resolve_candidate_path(candidate, path_lookup);
-      if (resolved.has_value()) {
-        resolved_paths.insert(*resolved);
+      if (!resolved.has_value()) {
+        continue;
+      }
+      tool.resolved_path = *resolved;
+      const auto version =
+          run_command(shell_escape(tool.resolved_path) + " " + version_arg);
+      tool.found = version.ok;
+      tool.version = version.ok ? first_line(version.output) : "";
+      tool.detail = version.ok ? first_line(version.output)
+                               : last_line(version.output.empty() ? "missing" : version.output);
+      if (tool.found) {
+        return tool;
       }
     }
-    if (resolved_paths.empty()) {
-      continue;
-    }
-    if (resolved_paths.size() > 1) {
-      tool.ambiguous = true;
-      std::ostringstream detail;
-      bool first = true;
-      for (const auto& path : resolved_paths) {
-        if (!first) {
-          detail << ", ";
-        }
-        first = false;
-        detail << path;
-      }
-      tool.detail = "ambiguous candidates: " + detail.str();
+    if (!tool.resolved_path.empty()) {
       return tool;
     }
-    tool.resolved_path = *resolved_paths.begin();
-    const auto version =
-        run_command(shell_escape(tool.resolved_path) + " " + version_arg);
-    tool.found = version.ok;
-    tool.version = version.ok ? first_line(version.output) : "";
-    tool.detail = version.ok ? first_line(version.output)
-                             : last_line(version.output.empty() ? "missing" : version.output);
-    return tool;
   }
 
   tool.detail = "not found";
@@ -297,7 +284,7 @@ std::vector<DoctorCheck> doctor_checks_from_environment(
   });
   checks.push_back(DoctorCheck{
       .name = "bench helper",
-      .status = environment.bench_helper_ok ? DoctorStatus::kPass : DoctorStatus::kFail,
+      .status = environment.bench_helper_ok ? DoctorStatus::kPass : DoctorStatus::kWarn,
       .detail = environment.bench_helper_detail,
   });
   return checks;
