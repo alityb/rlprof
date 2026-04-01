@@ -414,21 +414,6 @@ Validated on this codebase:
 - `aggregate` merges completed profiles after the fact. It does not create synchronized traces by itself.
 - kernel categories are conservative buckets; raw kernel names are authoritative.
 
-## Compatibility
-
-Validated development environment:
-
-| Component | Version |
-| --- | --- |
-| rlprof | `0.1.0` |
-| GPU | `NVIDIA A10G` |
-| Driver | `580.126.16` |
-| Nsight Systems | `2025.3.2.474-253236389321v0` |
-| Python | `3.12` |
-| torch | `2.10.0+cu128` |
-| triton | `3.6.0` |
-| vllm | `0.18.0` |
-
 ## Test Commands
 
 Standard suite:
