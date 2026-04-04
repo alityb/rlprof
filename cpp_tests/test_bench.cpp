@@ -3,12 +3,12 @@
 #include <iostream>
 #include <vector>
 
-#include "rlprof/bench/registry.h"
-#include "rlprof/bench/runner.h"
+#include "hotpath/bench/registry.h"
+#include "hotpath/bench/runner.h"
 
 namespace {
 
-class FakeBackend final : public rlprof::bench::BenchmarkBackend {
+class FakeBackend final : public hotpath::bench::BenchmarkBackend {
  public:
   explicit FakeBackend(std::vector<double> durations)
       : durations_(std::move(durations)) {}
@@ -35,30 +35,30 @@ void expect_true(bool condition, const std::string& message) {
 }  // namespace
 
 int main() {
-  const auto shapes = rlprof::bench::parse_shapes("1x4096,64x4096");
+  const auto shapes = hotpath::bench::parse_shapes("1x4096,64x4096");
   expect_true(shapes.size() == 2, "expected two parsed shapes");
   expect_true(shapes[0][0] == 1 && shapes[0][1] == 4096, "unexpected first shape");
 
-  std::vector<rlprof::bench::Shape> calls;
-  const rlprof::bench::KernelImpl impl = {
+  std::vector<hotpath::bench::Shape> calls;
+  const hotpath::bench::KernelImpl impl = {
       .name = "fake",
-      .setup = [](const rlprof::bench::Shape& shape, const std::string&) {
+      .setup = [](const hotpath::bench::Shape& shape, const std::string&) {
         return std::any(shape);
       },
       .fn = [&](std::any& state) {
-        calls.push_back(std::any_cast<rlprof::bench::Shape>(state));
+        calls.push_back(std::any_cast<hotpath::bench::Shape>(state));
       },
       .dtypes = {"bf16"},
-      .bytes_processed = [](const rlprof::bench::Shape& shape, const std::string&) {
+      .bytes_processed = [](const hotpath::bench::Shape& shape, const std::string&) {
         return static_cast<std::size_t>(shape[0] * shape[1] * 3 * 2);
       },
   };
 
   FakeBackend backend({1.0, 1.2, 0.8, 1.4});
-  const auto results = rlprof::bench::benchmark_impl(
+  const auto results = hotpath::bench::benchmark_impl(
       "silu_and_mul",
       impl,
-      {rlprof::bench::Shape{64, 4096}},
+      {hotpath::bench::Shape{64, 4096}},
       "bf16",
       2,
       4,

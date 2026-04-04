@@ -1,4 +1,4 @@
-#include "rlprof/aggregate.h"
+#include "hotpath/aggregate.h"
 
 #include <algorithm>
 #include <map>
@@ -7,9 +7,9 @@
 #include <string>
 #include <vector>
 
-#include "rlprof/profiler/vllm_metrics.h"
+#include "hotpath/profiler/vllm_metrics.h"
 
-namespace rlprof {
+namespace hotpath {
 
 ProfileData aggregate_profiles(const std::vector<std::filesystem::path>& paths) {
   if (paths.empty()) {
@@ -130,4 +130,4 @@ ProfileData aggregate_profiles(const std::vector<std::filesystem::path>& paths) 
   return aggregate;
 }
 
-}  // namespace rlprof
+}  // namespace hotpath

@@ -1,4 +1,4 @@
-#include "rlprof/targets.h"
+#include "hotpath/targets.h"
 
 #include <cctype>
 #include <cstdlib>
@@ -9,7 +9,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace rlprof {
+namespace hotpath {
 namespace {
 
 std::string trim(std::string value) {
@@ -41,13 +41,13 @@ std::string shell_escape(const std::string& value) {
 std::filesystem::path targets_path() {
   const char* xdg_config_home = std::getenv("XDG_CONFIG_HOME");
   if (xdg_config_home != nullptr && std::string(xdg_config_home).size() > 0) {
-    return std::filesystem::path(xdg_config_home) / "rlprof" / "targets.cfg";
+    return std::filesystem::path(xdg_config_home) / "hotpath" / "targets.cfg";
   }
   const char* home = std::getenv("HOME");
   if (home != nullptr && std::string(home).size() > 0) {
-    return std::filesystem::path(home) / ".config" / "rlprof" / "targets.cfg";
+    return std::filesystem::path(home) / ".config" / "hotpath" / "targets.cfg";
   }
-  return std::filesystem::path(".rlprof") / "targets.cfg";
+  return std::filesystem::path(".hotpath") / "targets.cfg";
 }
 
 std::map<std::string, SavedTarget> load_target_map() {
@@ -175,13 +175,13 @@ std::string bootstrap_target_command(
     const RemoteTarget& target,
     const std::string& local_repo_root) {
   return "COPYFILE_DISABLE=1 tar -C " + shell_escape(local_repo_root) +
-         " --exclude=.git --exclude=build --exclude=.venv --exclude=.rlprof -cf - . | "
+         " --exclude=.git --exclude=build --exclude=.venv --exclude=.hotpath -cf - . | "
          "ssh " + shell_escape(target.host) + " " +
          shell_escape(
              "mkdir -p " + shell_escape(target.workdir) +
              " && tar -xf - -C " + shell_escape(target.workdir) +
              " && cd " + shell_escape(target.workdir) +
-             " && cmake -S . -B build && cmake --build build --target rlprof");
+             " && cmake -S . -B build && cmake --build build --target hotpath");
 }
 
-}  // namespace rlprof
+}  // namespace hotpath

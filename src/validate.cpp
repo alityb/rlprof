@@ -1,4 +1,4 @@
-#include "rlprof/validate.h"
+#include "hotpath/validate.h"
 
 #include <algorithm>
 #include <cmath>
@@ -10,13 +10,13 @@
 #include <string>
 #include <vector>
 
-#include "rlprof/artifacts.h"
-#include "rlprof/profiler/vllm_metrics.h"
-#include "rlprof/store.h"
+#include "hotpath/artifacts.h"
+#include "hotpath/profiler/vllm_metrics.h"
+#include "hotpath/store.h"
 
 #include <sqlite3.h>
 
-namespace rlprof {
+namespace hotpath {
 namespace {
 
 using SqliteDbPtr = std::unique_ptr<sqlite3, decltype(&sqlite3_close)>;
@@ -235,4 +235,4 @@ std::string render_validation_report(
   return out.str();
 }
 
-}  // namespace rlprof
+}  // namespace hotpath

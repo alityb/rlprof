@@ -1,4 +1,4 @@
-#include "rlprof/ops.h"
+#include "hotpath/ops.h"
 
 #include <algorithm>
 #include <cctype>
@@ -10,10 +10,10 @@
 #include <string>
 #include <vector>
 
-#include "rlprof/artifacts.h"
-#include "rlprof/store.h"
+#include "hotpath/artifacts.h"
+#include "hotpath/store.h"
 
-namespace rlprof {
+namespace hotpath {
 namespace {
 
 std::string json_escape(const std::string& value) {
@@ -173,4 +173,4 @@ std::string cleanup_artifacts(
   return out.str();
 }
 
-}  // namespace rlprof
+}  // namespace hotpath

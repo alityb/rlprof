@@ -1,4 +1,4 @@
-#include "rlprof/bench/runner.h"
+#include "hotpath/bench/runner.h"
 
 #include <algorithm>
 #include <cctype>
@@ -13,7 +13,7 @@
 #include <stdexcept>
 #include <variant>
 
-namespace rlprof::bench {
+namespace hotpath::bench {
 namespace {
 
 class ChronoBackend final : public BenchmarkBackend {
@@ -634,7 +634,7 @@ std::filesystem::path resolve_bench_output_path(
     return output_spec;
   }
   const auto now = std::chrono::system_clock::now().time_since_epoch().count();
-  return std::filesystem::path(".rlprof") /
+  return std::filesystem::path(".hotpath") /
          ("bench_" + kernel + "_" + std::to_string(now) + ".json");
 }
 
@@ -711,4 +711,4 @@ std::string render_bench_output(const BenchRunOutput& output) {
   return out.str();
 }
 
-}  // namespace rlprof::bench
+}  // namespace hotpath::bench

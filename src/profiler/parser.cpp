@@ -1,4 +1,4 @@
-#include "rlprof/profiler/parser.h"
+#include "hotpath/profiler/parser.h"
 
 #include <sqlite3.h>
 
@@ -14,9 +14,9 @@
 #include <string_view>
 #include <vector>
 
-#include "rlprof/profiler/categorizer.h"
+#include "hotpath/profiler/categorizer.h"
 
-namespace rlprof::profiler {
+namespace hotpath::profiler {
 namespace {
 
 using SqliteDbPtr = std::unique_ptr<sqlite3, decltype(&sqlite3_close)>;
@@ -364,4 +364,4 @@ std::vector<KernelRecord> parse_nsys_sqlite(const std::filesystem::path& path) {
   return records;
 }
 
-}  // namespace rlprof::profiler
+}  // namespace hotpath::profiler

@@ -6,7 +6,7 @@
 
 #include <sqlite3.h>
 
-#include "rlprof/store.h"
+#include "hotpath/store.h"
 
 namespace {
 
@@ -21,12 +21,12 @@ void expect_true(bool condition, const std::string& message) {
 
 int main() {
   namespace fs = std::filesystem;
-  const fs::path temp_dir = fs::temp_directory_path() / "rlprof_cpp_tests";
+  const fs::path temp_dir = fs::temp_directory_path() / "hotpath_cpp_tests";
   fs::create_directories(temp_dir);
   const fs::path db_path = temp_dir / "profile.db";
   fs::remove(db_path);
 
-  const rlprof::ProfileData profile = {
+  const hotpath::ProfileData profile = {
       .meta = {
           {"gpu_name", "NVIDIA A10G"},
           {"model_name", "Qwen/Qwen3-8B"},
@@ -72,8 +72,8 @@ int main() {
       },
   };
 
-  rlprof::save_profile(db_path, profile);
-  const rlprof::ProfileData loaded = rlprof::load_profile(db_path);
+  hotpath::save_profile(db_path, profile);
+  const hotpath::ProfileData loaded = hotpath::load_profile(db_path);
 
   expect_true(loaded.meta == profile.meta, "meta round-trip mismatch");
   expect_true(loaded.kernels.size() == 1, "expected one kernel row");
@@ -95,9 +95,9 @@ int main() {
   fs::current_path(cwd_root);
   try {
     const fs::path cwd_db = "profile.db";
-    rlprof::save_profile(cwd_db, profile);
+    hotpath::save_profile(cwd_db, profile);
     expect_true(fs::exists(cwd_db), "expected save_profile to support bare filename output");
-    const rlprof::ProfileData cwd_loaded = rlprof::load_profile(cwd_db);
+    const hotpath::ProfileData cwd_loaded = hotpath::load_profile(cwd_db);
     expect_true(cwd_loaded.meta == profile.meta, "cwd meta round-trip mismatch");
     fs::remove(cwd_db);
   } catch (...) {
@@ -107,7 +107,7 @@ int main() {
   fs::current_path(original_cwd);
 
   const fs::path partial_db = temp_dir / "partial_traffic.db";
-  rlprof::save_profile(partial_db, profile);
+  hotpath::save_profile(partial_db, profile);
   sqlite3* db = nullptr;
   if (sqlite3_open(partial_db.c_str(), &db) != SQLITE_OK) {
     std::cerr << "failed to open sqlite db for partial traffic test\n";
@@ -123,7 +123,7 @@ int main() {
   }
   sqlite3_close(db);
 
-  const rlprof::ProfileData partial_loaded = rlprof::load_profile(partial_db);
+  const hotpath::ProfileData partial_loaded = hotpath::load_profile(partial_db);
   expect_true(partial_loaded.traffic_stats.total_requests == 0, "missing total_requests should default to zero");
   expect_true(partial_loaded.traffic_stats.errors == 0, "missing errors should default to zero");
   expect_true(partial_loaded.traffic_stats.completion_length_samples == 0, "missing completion sample count should default to zero");

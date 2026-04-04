@@ -4,8 +4,8 @@
 #include <string>
 #include <vector>
 
-#include "rlprof/profiler/kernel_record.h"
-#include "rlprof/report.h"
+#include "hotpath/profiler/kernel_record.h"
+#include "hotpath/report.h"
 
 namespace {
 
@@ -19,8 +19,8 @@ void expect_contains(const std::string& haystack, const std::string& needle) {
 }  // namespace
 
 int main() {
-  const std::string partial_metadata_report = rlprof::render_report(
-      rlprof::ReportMeta{
+  const std::string partial_metadata_report = hotpath::render_report(
+      hotpath::ReportMeta{
           .model_name = "Qwen/Qwen3-8B",
           .gpu_name = "NVIDIA A10G",
           .vllm_version = "v0.1.0",
@@ -35,7 +35,7 @@ int main() {
       },
       {},
       {},
-      rlprof::TrafficStats{
+      hotpath::TrafficStats{
           .total_requests = 0,
           .completion_length_mean = std::nullopt,
           .completion_length_p50 = std::nullopt,
@@ -49,8 +49,8 @@ int main() {
     return 1;
   }
 
-  const std::string report = rlprof::render_report(
-      rlprof::ReportMeta{
+  const std::string report = hotpath::render_report(
+      hotpath::ReportMeta{
           .model_name = "Qwen/Qwen3-8B",
           .gpu_name = "NVIDIA A10G",
           .vllm_version = "v0.1.0",
@@ -80,7 +80,7 @@ int main() {
           {"warning_gpu_clocks_unlocked", "true"},
           {"warning_temp_high", "true"},
       },
-      std::vector<rlprof::profiler::KernelRecord>{
+      std::vector<hotpath::profiler::KernelRecord>{
           {
               .name = "sm80_xmma_gemm_bf16",
               .category = "gemm",
@@ -115,7 +115,7 @@ int main() {
               .shared_mem = 0,
           },
       },
-      std::vector<rlprof::MetricSummary>{
+      std::vector<hotpath::MetricSummary>{
           {
               .metric = "vllm:num_preemptions_total",
               .avg = std::nullopt,
@@ -135,7 +135,7 @@ int main() {
               .min = std::nullopt,
           },
       },
-      rlprof::TrafficStats{
+      hotpath::TrafficStats{
           .total_requests = 1024,
           .completion_length_mean = 1847.0,
           .completion_length_p50 = std::nullopt,
@@ -146,14 +146,14 @@ int main() {
       });
 
   // Header uses Unicode box-drawing separator │
-  expect_contains(report, "rlprof");
+  expect_contains(report, "hotpath");
   expect_contains(report, "Qwen/Qwen3-8B");
   expect_contains(report, "NVIDIA A10G");
   expect_contains(report, "v0.1.0");
   expect_contains(report, "conservative substring matching");
   expect_contains(report, "WARNINGS");
   expect_contains(report, "aggregate traffic p50/p99 are upper bounds");
-  expect_contains(report, "GPU clocks are not locked. Run `rlprof lock-clocks`");
+  expect_contains(report, "GPU clocks are not locked. Run `hotpath lock-clocks`");
   expect_contains(report, "gpu temperature reached high operating range");
   expect_contains(report, "MEASUREMENT CONTEXT");
   expect_contains(report, "gpu clock policy");

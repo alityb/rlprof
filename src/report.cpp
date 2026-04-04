@@ -1,4 +1,4 @@
-#include "rlprof/report.h"
+#include "hotpath/report.h"
 
 #include <algorithm>
 #include <cmath>
@@ -18,7 +18,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-namespace rlprof {
+namespace hotpath {
 namespace {
 
 // ── Layout constants ──
@@ -273,7 +273,7 @@ std::vector<std::string> warning_messages(const std::map<std::string, std::strin
       "aggregate traffic p50/p99 are upper bounds from member runs; max/median is the max observed per-run ratio");
   append_if(
       "warning_gpu_clocks_unlocked",
-      "GPU clocks are not locked. Run `rlprof lock-clocks` for reproducible measurements.");
+      "GPU clocks are not locked. Run `hotpath lock-clocks` for reproducible measurements.");
   return warnings;
 }
 
@@ -299,7 +299,7 @@ std::string render_report(
 
   // ── Header ──────────────────────────────────────────────────────────
   output << "\n"
-         << c.bold << c.cyan << "  rlprof" << c.reset
+         << c.bold << c.cyan << "  hotpath" << c.reset
          << c.dim << " \xe2\x94\x82 " << c.reset  // │
          << meta.model_name
          << c.dim << " \xe2\x94\x82 " << c.reset
@@ -622,4 +622,101 @@ std::string render_report(
   return output.str();
 }
 
-}  // namespace rlprof
+std::string render_serve_report(const ServeReportData& d) {
+  std::ostringstream o;
+
+  auto bar = [](double pct, int width = 14) -> std::string {
+    std::string result;
+    const int filled = static_cast<int>(pct / 100.0 * width + 0.5);
+    for (int i = 0; i < width; ++i) {
+      result += (i < filled) ? "\xe2\x96\x88" : "\xe2\x96\x91";
+    }
+    return result;
+  };
+
+  o << "hotpath serve-report \xe2\x80\x94 " << d.model_name
+    << " \xe2\x80\x94 " << d.engine
+    << " \xe2\x80\x94 " << d.gpu_info << "\n";
+  o << "\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90"
+       "\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90"
+       "\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90"
+       "\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90"
+       "\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90"
+       "\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\n\n";
+
+  o << std::fixed;
+
+  o << "Requests: " << d.total_requests
+    << "  |  Duration: " << std::setprecision(1) << d.duration_seconds << "s"
+    << "  |  Throughput: " << std::setprecision(1) << d.throughput_rps << " req/s\n\n";
+
+  // Latency table
+  const std::string sep = "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                          "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                          "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                          "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                          "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                          "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80";
+
+  o << "Latency (ms)              p50      p90      p99\n";
+  o << sep << sep << "\n";
+
+  auto latency_row = [&](const std::string& label, double p50, double p90, double p99) {
+    o << std::left << std::setw(24) << label
+      << std::right << std::setw(8) << std::setprecision(1) << p50
+      << std::setw(9) << p90
+      << std::setw(9) << p99 << "\n";
+  };
+
+  latency_row("Queue wait", d.queue_p50, d.queue_p90, d.queue_p99);
+  latency_row("Prefill", d.prefill_p50, d.prefill_p90, d.prefill_p99);
+  latency_row("Decode (total)", d.decode_total_p50, d.decode_total_p90, d.decode_total_p99);
+  latency_row("Decode (per-token)", d.decode_per_token_p50, d.decode_per_token_p90, d.decode_per_token_p99);
+  latency_row("End-to-end", d.e2e_p50, d.e2e_p90, d.e2e_p99);
+
+  o << "\nGPU Phase Breakdown\n" << sep << sep << "\n";
+  o << std::left << std::setw(24) << "Prefill compute"
+    << std::right << std::setw(6) << std::setprecision(1) << d.prefill_compute_pct << "%   "
+    << bar(d.prefill_compute_pct) << "\n";
+  o << std::left << std::setw(24) << "Decode compute"
+    << std::right << std::setw(6) << std::setprecision(1) << d.decode_compute_pct << "%   "
+    << bar(d.decode_compute_pct) << "\n";
+  o << std::left << std::setw(24) << "Other / idle"
+    << std::right << std::setw(6) << std::setprecision(1) << d.other_idle_pct << "%   "
+    << bar(d.other_idle_pct) << "\n";
+
+  o << "\nKV Cache\n" << sep << sep << "\n";
+  o << std::left << std::setw(24) << "Hit rate"
+    << std::right << std::setw(6) << std::setprecision(1) << d.cache_hit_rate * 100.0 << "%\n";
+  o << std::left << std::setw(24) << "Avg usage"
+    << std::right << std::setw(6) << std::setprecision(1) << d.avg_cache_usage << "%\n";
+  o << std::left << std::setw(24) << "Evictions"
+    << std::right << std::setw(6) << d.evictions << "\n";
+
+  o << "\nPrefix Sharing\n" << sep << sep << "\n";
+  o << std::left << std::setw(24) << "Unique prefixes"
+    << std::right << std::setw(6) << d.unique_prefixes << "\n";
+  o << std::left << std::setw(24) << "Cacheable tokens"
+    << std::right << std::setw(6) << std::setprecision(1) << d.cacheable_tokens_pct << "%\n";
+
+  o << "\nDisaggregation Advisor\n" << sep << sep << "\n";
+  if (d.should_disaggregate) {
+    o << std::left << std::setw(24) << "Recommendation:" << "DISAGGREGATE\n";
+    o << std::left << std::setw(24) << "Optimal P:D ratio:"
+      << d.optimal_p << ":" << d.optimal_d << "\n";
+    o << std::left << std::setw(24) << "Projected throughput:"
+      << "+" << static_cast<int>(d.projected_throughput_pct) << "% ("
+      << std::setprecision(1) << d.projected_throughput_rps << " req/s)\n";
+    o << std::left << std::setw(24) << "Projected p99 TTFT:"
+      << static_cast<int>(d.mono_p99_ttft) << "ms -> "
+      << static_cast<int>(d.disagg_p99_ttft) << "ms\n";
+    o << std::left << std::setw(24) << "Min network bandwidth:"
+      << static_cast<int>(d.min_bandwidth_gbps) << " Gbps\n";
+  } else {
+    o << std::left << std::setw(24) << "Recommendation:" << "MONOLITHIC\n";
+  }
+
+  return o.str();
+}
+
+}  // namespace hotpath

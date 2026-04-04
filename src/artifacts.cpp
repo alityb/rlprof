@@ -1,4 +1,4 @@
-#include "rlprof/artifacts.h"
+#include "hotpath/artifacts.h"
 
 #include <iomanip>
 #include <optional>
@@ -6,9 +6,9 @@
 #include <string>
 #include <vector>
 
-#include "rlprof/store.h"
+#include "hotpath/store.h"
 
-namespace rlprof {
+namespace hotpath {
 namespace {
 
 std::string meta_path_or(
@@ -133,4 +133,4 @@ std::string render_trace_artifacts(
   return out.str();
 }
 
-}  // namespace rlprof
+}  // namespace hotpath

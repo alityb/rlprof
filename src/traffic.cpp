@@ -1,4 +1,4 @@
-#include "rlprof/traffic.h"
+#include "hotpath/traffic.h"
 
 #include <algorithm>
 #include <array>
@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-namespace rlprof {
+namespace hotpath {
 namespace {
 
 void validate_traffic_request_shape(
@@ -85,7 +85,7 @@ std::pair<long, std::string> run_curl_json(
   const auto nonce =
       std::chrono::steady_clock::now().time_since_epoch().count();
   const fs::path temp_path =
-      fs::temp_directory_path() / ("rlprof_payload_" + std::to_string(nonce) + ".json");
+      fs::temp_directory_path() / ("hotpath_payload_" + std::to_string(nonce) + ".json");
 
   {
     std::ofstream out(temp_path);
@@ -319,4 +319,4 @@ TrafficRun fire_rl_traffic(
   };
 }
 
-}  // namespace rlprof
+}  // namespace hotpath

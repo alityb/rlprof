@@ -1,4 +1,4 @@
-#include "rlprof/bench/kernels/silu_mul.h"
+#include "hotpath/bench/kernels/silu_mul.h"
 
 #include <algorithm>
 #include <any>
@@ -7,9 +7,9 @@
 #include <random>
 #include <vector>
 
-#include "rlprof/bench/registry.h"
+#include "hotpath/bench/registry.h"
 
-namespace rlprof::bench::kernels {
+namespace hotpath::bench::kernels {
 namespace {
 
 struct SiluMulState {
@@ -124,4 +124,4 @@ void register_silu_mul() {
       });
 }
 
-}  // namespace rlprof::bench::kernels
+}  // namespace hotpath::bench::kernels

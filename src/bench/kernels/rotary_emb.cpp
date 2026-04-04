@@ -1,4 +1,4 @@
-#include "rlprof/bench/kernels/rotary_emb.h"
+#include "hotpath/bench/kernels/rotary_emb.h"
 
 #include <algorithm>
 #include <any>
@@ -7,9 +7,9 @@
 #include <random>
 #include <vector>
 
-#include "rlprof/bench/registry.h"
+#include "hotpath/bench/registry.h"
 
-namespace rlprof::bench::kernels {
+namespace hotpath::bench::kernels {
 namespace {
 
 struct RotaryState {
@@ -105,4 +105,4 @@ void register_rotary_emb() {
       });
 }
 
-}  // namespace rlprof::bench::kernels
+}  // namespace hotpath::bench::kernels

@@ -1,4 +1,4 @@
-#include "rlprof/profiler/categorizer.h"
+#include "hotpath/profiler/categorizer.h"
 
 #include <algorithm>
 #include <array>
@@ -6,7 +6,7 @@
 #include <string>
 #include <string_view>
 
-namespace rlprof::profiler {
+namespace hotpath::profiler {
 namespace {
 
 struct PatternGroup {
@@ -55,4 +55,33 @@ std::string_view categorize(std::string_view kernel_name) {
   return "other";
 }
 
-}  // namespace rlprof::profiler
+KernelPhase classify_phase(std::string_view kernel_name,
+                           GridDim grid,
+                           int64_t grid_threshold) {
+  const std::string lowered = to_lower(kernel_name);
+
+  // Rule 1: flash attention forward → PREFILL
+  if (lowered.find("flash_fwd") != std::string::npos ||
+      lowered.find("flash_attn_forward") != std::string::npos) {
+    return KernelPhase::PREFILL;
+  }
+
+  // Rule 2: paged attention / reshape_and_cache → DECODE
+  if (lowered.find("paged_attention") != std::string::npos ||
+      lowered.find("reshape_and_cache") != std::string::npos) {
+    return KernelPhase::DECODE;
+  }
+
+  // Rule 3: rotary / rms_norm → classify by grid size
+  if (lowered.find("rotary") != std::string::npos ||
+      lowered.find("rms_norm") != std::string::npos) {
+    const int64_t grid_volume =
+        static_cast<int64_t>(grid.x) * static_cast<int64_t>(grid.y) * static_cast<int64_t>(grid.z);
+    return (grid_volume > grid_threshold) ? KernelPhase::PREFILL : KernelPhase::DECODE;
+  }
+
+  // Rule 4: default
+  return KernelPhase::UNKNOWN;
+}
+
+}  // namespace hotpath::profiler

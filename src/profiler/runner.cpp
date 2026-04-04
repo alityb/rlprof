@@ -1,4 +1,4 @@
-#include "rlprof/profiler/runner.h"
+#include "hotpath/profiler/runner.h"
 
 #include <algorithm>
 #include <array>
@@ -24,16 +24,16 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include "rlprof/clock_control.h"
-#include "rlprof/doctor.h"
-#include "rlprof/profiler/attach.h"
-#include "rlprof/profiler/parser.h"
-#include "rlprof/profiler/server.h"
-#include "rlprof/profiler/vllm_metrics.h"
-#include "rlprof/store.h"
-#include "rlprof/traffic.h"
+#include "hotpath/clock_control.h"
+#include "hotpath/doctor.h"
+#include "hotpath/profiler/attach.h"
+#include "hotpath/profiler/parser.h"
+#include "hotpath/profiler/server.h"
+#include "hotpath/profiler/vllm_metrics.h"
+#include "hotpath/store.h"
+#include "hotpath/traffic.h"
 
-namespace rlprof::profiler {
+namespace hotpath::profiler {
 namespace {
 
 struct GpuTelemetrySample {
@@ -432,7 +432,7 @@ std::filesystem::path default_output_prefix(const ProfileConfig& config) {
   const auto now = std::chrono::system_clock::now().time_since_epoch().count();
   std::string model = config.model;
   std::replace(model.begin(), model.end(), '/', '_');
-  return std::filesystem::path(".rlprof") / (model + "_" + std::to_string(now));
+  return std::filesystem::path(".hotpath") / (model + "_" + std::to_string(now));
 }
 
 std::filesystem::path server_log_path_for_output(
@@ -484,7 +484,7 @@ void validate_profile_environment(
 }
 
 std::string make_session_name(const std::filesystem::path& output_prefix) {
-  std::string session = "rlprof_";
+  std::string session = "hotpath_";
   const std::string stem = output_prefix.filename().string();
   for (unsigned char ch : stem) {
     session.push_back(std::isalnum(ch) ? static_cast<char>(ch) : '_');
@@ -493,7 +493,7 @@ std::string make_session_name(const std::filesystem::path& output_prefix) {
 }
 
 std::filesystem::path managed_server_lock_path(const std::string& name) {
-  return std::filesystem::path(".rlprof") / "servers" / (name + ".lock");
+  return std::filesystem::path(".hotpath") / "servers" / (name + ".lock");
 }
 
 std::int64_t read_managed_server_lock_owner(const std::filesystem::path& path) {
@@ -791,7 +791,7 @@ ProfileRunResult finalize_profile_run(
     const ProfileConfig& config,
     std::int64_t actual_max_model_len,
     const RuntimeEnvironmentInfo& environment,
-    const rlprof::ClockPolicyInfo& clock_policy,
+    const hotpath::ClockPolicyInfo& clock_policy,
     const std::string& server_url,
     const std::vector<std::string>& traffic_servers,
     const std::filesystem::path& output_prefix,
@@ -866,7 +866,7 @@ ProfileRunResult finalize_profile_run(
       {"artifact_db_path", db_path.string()},
       {"artifact_nsys_rep_path", (!attach_mode || attach_mode_kind != "metrics_only") ? nsys_rep_path.string() : ""},
       {"artifact_nsys_sqlite_path", (!attach_mode || attach_mode_kind != "metrics_only") ? sqlite_path.string() : ""},
-      {"measurement_gpu_clock_policy", rlprof::render_clock_policy(clock_policy)},
+      {"measurement_gpu_clock_policy", hotpath::render_clock_policy(clock_policy)},
       {"measurement_gpu_clocks_locked", clock_policy.gpu_clocks_locked ? "true" : "false"},
       {"measurement_gpu_clock_policy_query_ok", clock_policy.query_ok ? "true" : "false"},
       {"measurement_start_at_unix_ms", std::to_string(config.start_at_unix_ms)},
@@ -1040,7 +1040,7 @@ ProfileRunResult run_profile(const ProfileConfig& config, ProgressCallback progr
       cluster_server_urls(effective_config, server_url);
   const std::vector<MetricEndpoint> metrics_endpoints =
       metric_endpoints(traffic_servers);
-  const rlprof::ClockPolicyInfo clock_policy = rlprof::query_clock_policy();
+  const hotpath::ClockPolicyInfo clock_policy = hotpath::query_clock_policy();
   const std::string vllm_path =
       environment.vllm.resolved_path.empty() ? vllm_binary() : environment.vllm.resolved_path;
   std::filesystem::path managed_server_lock;
@@ -1209,7 +1209,7 @@ std::vector<ProfileRunResult> run_soak_profile(
   const bool attach_by_process = attach_mode && config.attach_pid > 0;
   if (attach_mode && !attach_by_process) {
     throw std::runtime_error(
-        "fast soak-profile requires rlprof to launch the server; attach mode falls back to repeated profile runs");
+        "fast soak-profile requires hotpath to launch the server; attach mode falls back to repeated profile runs");
   }
 
   const std::filesystem::path output_base = default_output_prefix(config);
@@ -1269,7 +1269,7 @@ std::vector<ProfileRunResult> run_soak_profile(
   const std::vector<std::string> traffic_servers =
       cluster_server_urls(effective_config, server_url);
   const std::vector<MetricEndpoint> metrics_endpoints = metric_endpoints(traffic_servers);
-  const rlprof::ClockPolicyInfo clock_policy = rlprof::query_clock_policy();
+  const hotpath::ClockPolicyInfo clock_policy = hotpath::query_clock_policy();
   const std::string vllm_path =
       environment.vllm.resolved_path.empty() ? vllm_binary() : environment.vllm.resolved_path;
   std::filesystem::path managed_server_lock;
@@ -1419,4 +1419,4 @@ std::vector<ProfileRunResult> run_soak_profile(
   }
 }
 
-}  // namespace rlprof::profiler
+}  // namespace hotpath::profiler

@@ -1,4 +1,4 @@
-#include "rlprof/stability.h"
+#include "hotpath/stability.h"
 
 #include <algorithm>
 #include <cmath>
@@ -15,7 +15,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-namespace rlprof {
+namespace hotpath {
 namespace {
 
 constexpr double kCategoryWarnRatio = 1.10;
@@ -255,4 +255,4 @@ std::string render_stability_report(const StabilityReport& report, bool color) {
   return output.str();
 }
 
-}  // namespace rlprof
+}  // namespace hotpath

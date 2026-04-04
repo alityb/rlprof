@@ -6,7 +6,7 @@
 
 #include <sqlite3.h>
 
-#include "rlprof/profiler/parser.h"
+#include "hotpath/profiler/parser.h"
 
 namespace {
 
@@ -31,9 +31,9 @@ void expect_true(bool condition, const std::string& message) {
 
 int main() {
   namespace fs = std::filesystem;
-  const fs::path temp_dir = fs::temp_directory_path() / "rlprof_cpp_tests";
+  const fs::path temp_dir = fs::temp_directory_path() / "hotpath_cpp_tests";
   fs::create_directories(temp_dir);
-  const auto verify_records = [](const std::vector<rlprof::profiler::KernelRecord>& records) {
+  const auto verify_records = [](const std::vector<hotpath::profiler::KernelRecord>& records) {
     expect_true(records.size() == 2, "expected two aggregated kernel records");
     expect_true(records[0].name == "sm80_xmma_gemm_bf16", "unexpected first kernel");
     expect_true(records[0].category == "gemm", "unexpected first category");
@@ -56,7 +56,7 @@ int main() {
     expect_true(records[1].shared_mem == 64, "unexpected second shared_mem");
   };
 
-  const auto verify_nvtx_records = [](const std::vector<rlprof::profiler::KernelRecord>& records) {
+  const auto verify_nvtx_records = [](const std::vector<hotpath::profiler::KernelRecord>& records) {
     expect_true(records.size() == 1, "expected one aggregated kernel record");
     expect_true(records[0].name == "Kernel2", "unexpected nvtx kernel");
     expect_true(records[0].category == "attention", "nvtx overlap should override name fallback");
@@ -236,17 +236,17 @@ int main() {
   try {
     const fs::path text_db_path = temp_dir / "mock_nsys.sqlite";
     build_text_schema_db(text_db_path);
-    verify_records(rlprof::profiler::parse_nsys_sqlite(text_db_path));
+    verify_records(hotpath::profiler::parse_nsys_sqlite(text_db_path));
     fs::remove(text_db_path);
 
     const fs::path string_ids_db_path = temp_dir / "mock_nsys_string_ids.sqlite";
     build_string_ids_db(string_ids_db_path);
-    verify_records(rlprof::profiler::parse_nsys_sqlite(string_ids_db_path));
+    verify_records(hotpath::profiler::parse_nsys_sqlite(string_ids_db_path));
     fs::remove(string_ids_db_path);
 
     const fs::path nvtx_db_path = temp_dir / "mock_nsys_nvtx.sqlite";
     build_nvtx_db(nvtx_db_path);
-    verify_nvtx_records(rlprof::profiler::parse_nsys_sqlite(nvtx_db_path));
+    verify_nvtx_records(hotpath::profiler::parse_nsys_sqlite(nvtx_db_path));
     fs::remove(nvtx_db_path);
   } catch (const std::exception& exc) {
     std::cerr << exc.what() << "\n";

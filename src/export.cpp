@@ -1,4 +1,4 @@
-#include "rlprof/export.h"
+#include "hotpath/export.h"
 
 #include <fstream>
 #include <optional>
@@ -7,9 +7,10 @@
 #include <string>
 #include <vector>
 
-#include "rlprof/store.h"
+#include "hotpath/otlp_export.h"
+#include "hotpath/store.h"
 
-namespace rlprof {
+namespace hotpath {
 namespace {
 
 std::vector<std::pair<std::string, std::string>> export_warnings(
@@ -32,7 +33,7 @@ std::vector<std::pair<std::string, std::string>> export_warnings(
       "aggregate traffic p50/p99 values are upper bounds from member runs; max/median is the max observed per-run ratio, not an exact combined percentile");
   add_warning(
       "warning_gpu_clocks_unlocked",
-      "GPU clocks are not locked. Run `rlprof lock-clocks` for reproducible measurements. See: docs.nvidia.com/deploy/nvidia-smi/index.html");
+      "GPU clocks are not locked. Run `hotpath lock-clocks` for reproducible measurements. See: docs.nvidia.com/deploy/nvidia-smi/index.html");
   return warnings;
 }
 
@@ -243,7 +244,15 @@ std::vector<std::filesystem::path> export_profile(
     return outputs;
   }
 
+  if (format == "otlp") {
+    // Export request traces as OTLP JSON
+    const auto traces = load_request_traces(path, 1);
+    const auto otlp_path = path.parent_path() / "traces.otlp.json";
+    export_otlp_file(traces, otlp_path);
+    return {otlp_path};
+  }
+
   throw std::runtime_error("unsupported export format: " + format);
 }
 
-}  // namespace rlprof
+}  // namespace hotpath

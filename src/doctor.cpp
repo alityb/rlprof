@@ -1,4 +1,4 @@
-#include "rlprof/doctor.h"
+#include "hotpath/doctor.h"
 
 #include <array>
 #include <cstdio>
@@ -11,9 +11,9 @@
 #include <string>
 #include <vector>
 
-#include "rlprof/clock_control.h"
+#include "hotpath/clock_control.h"
 
-namespace rlprof {
+namespace hotpath {
 namespace {
 
 struct CommandResult {
@@ -232,7 +232,7 @@ RuntimeEnvironmentInfo inspect_runtime_environment() {
       environment.vllm.found && !environment.vllm.ambiguous) {
     const auto bench = run_command(
         shell_escape(environment.python.resolved_path) +
-        " -c \"import torch, vllm, rlprof_py.bench_cuda; "
+        " -c \"import torch, vllm, hotpath_py.bench_cuda; "
         "raise SystemExit(0 if torch.cuda.is_available() else 1)\"");
     environment.bench_helper_ok = bench.ok;
     environment.bench_helper_detail =
@@ -357,4 +357,4 @@ std::string render_doctor_report(const std::vector<DoctorCheck>& checks, bool co
   return out.str();
 }
 
-}  // namespace rlprof
+}  // namespace hotpath

@@ -1,4 +1,4 @@
-#include "rlprof/profiler/vllm_metrics.h"
+#include "hotpath/profiler/vllm_metrics.h"
 
 #include <algorithm>
 #include <array>
@@ -12,7 +12,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace rlprof::profiler {
+namespace hotpath::profiler {
 namespace {
 
 const std::unordered_set<std::string> kKeyMetrics = {
@@ -251,4 +251,4 @@ std::vector<MetricSample> poll_metrics(
   return samples;
 }
 
-}  // namespace rlprof::profiler
+}  // namespace hotpath::profiler

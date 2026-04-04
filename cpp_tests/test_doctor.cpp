@@ -4,7 +4,7 @@
 #include <iostream>
 #include <string>
 
-#include "rlprof/doctor.h"
+#include "hotpath/doctor.h"
 
 namespace {
 
@@ -31,21 +31,21 @@ void write_script(
 }  // namespace
 
 int main() {
-  const auto rendered = rlprof::render_doctor_report(
+  const auto rendered = hotpath::render_doctor_report(
       {
-          rlprof::DoctorCheck{
+          hotpath::DoctorCheck{
               .name = "nsys",
-              .status = rlprof::DoctorStatus::kPass,
+              .status = hotpath::DoctorStatus::kPass,
               .detail = "version ok",
           },
-          rlprof::DoctorCheck{
+          hotpath::DoctorCheck{
               .name = "clock policy",
-              .status = rlprof::DoctorStatus::kWarn,
+              .status = hotpath::DoctorStatus::kWarn,
               .detail = "unlocked",
           },
-          rlprof::DoctorCheck{
+          hotpath::DoctorCheck{
               .name = "vllm",
-              .status = rlprof::DoctorStatus::kFail,
+              .status = hotpath::DoctorStatus::kFail,
               .detail = "missing",
           },
       },
@@ -56,7 +56,7 @@ int main() {
   expect_true(rendered.find("FAIL") != std::string::npos, "expected fail row");
 
   namespace fs = std::filesystem;
-  const fs::path temp_root = fs::temp_directory_path() / "rlprof_test_doctor";
+  const fs::path temp_root = fs::temp_directory_path() / "hotpath_test_doctor";
   fs::remove_all(temp_root);
   fs::create_directories(temp_root / "bin");
 
@@ -98,7 +98,7 @@ int main() {
   unsetenv("RLPROF_VLLM_EXECUTABLE");
   fs::current_path(temp_root);
 
-  const auto environment = rlprof::inspect_runtime_environment();
+  const auto environment = hotpath::inspect_runtime_environment();
   expect_true(environment.python.found, "expected python resolution to succeed");
   expect_true(!environment.python.ambiguous, "expected python resolution to avoid false ambiguity");
   expect_true(environment.python.resolved_path == (temp_root / "bin" / "python3").string(),

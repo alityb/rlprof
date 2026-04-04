@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace rlprof::interactive {
+namespace hotpath::interactive {
 
 struct ProfileConfig {
   std::string model;
@@ -74,4 +74,4 @@ void run_with_progress(
     const std::string& initial_status,
     const std::function<void(const ProgressCallback&)>& action);
 
-}  // namespace rlprof::interactive
+}  // namespace hotpath::interactive

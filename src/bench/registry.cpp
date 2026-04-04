@@ -1,12 +1,12 @@
-#include "rlprof/bench/registry.h"
+#include "hotpath/bench/registry.h"
 
 #include <unordered_map>
 
-#include "rlprof/bench/kernels/rms_norm.h"
-#include "rlprof/bench/kernels/rotary_emb.h"
-#include "rlprof/bench/kernels/silu_mul.h"
+#include "hotpath/bench/kernels/rms_norm.h"
+#include "hotpath/bench/kernels/rotary_emb.h"
+#include "hotpath/bench/kernels/silu_mul.h"
 
-namespace rlprof::bench {
+namespace hotpath::bench {
 namespace {
 
 std::unordered_map<std::string, std::vector<KernelImpl>>& registry() {
@@ -40,4 +40,4 @@ void register_builtin_kernels() {
   kernels::register_rotary_emb();
 }
 
-}  // namespace rlprof::bench
+}  // namespace hotpath::bench

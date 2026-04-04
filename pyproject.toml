@@ -5,7 +5,7 @@ requires = [
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "rlprof"
+name = "hotpath"
 version = "0.1.1"
 description = "Profile vLLM inference under RL-style rollout workloads."
 readme = "README.md"
@@ -29,9 +29,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/alityb/rlprof"
-Repository = "https://github.com/alityb/rlprof"
-Issues = "https://github.com/alityb/rlprof/issues"
+Homepage = "https://github.com/alityb/hotpath"
+Repository = "https://github.com/alityb/hotpath"
+Issues = "https://github.com/alityb/hotpath/issues"
 
 [project.optional-dependencies]
 bench = [
@@ -41,14 +41,14 @@ bench = [
 ]
 
 [project.scripts]
-rlprof = "rlprof_py.cli:main"
+hotpath = "hotpath_py.cli:main"
 
 [tool.scikit-build]
 sdist.include = [
     "CMakeLists.txt",
     "include/**",
     "src/**",
-    "rlprof_py/**",
+    "hotpath_py/**",
     "README.md",
     "CHANGELOG.md",
 ]
@@ -72,14 +72,14 @@ wheel.exclude = [
     "dist/**",
     "build/**",
 ]
-wheel.packages = ["rlprof_py"]
+wheel.packages = ["hotpath_py"]
 
 [tool.cibuildwheel]
 build = ["cp310-manylinux_x86_64", "cp311-manylinux_x86_64", "cp312-manylinux_x86_64"]
 skip = ["pp*"]
 test-command = [
-    "rlprof version",
-    "python -c \"import rlprof_py; print(rlprof_py.__version__)\"",
+    "hotpath version",
+    "python -c \"import hotpath_py; print(hotpath_py.__version__)\"",
 ]
 
 [tool.cibuildwheel.linux]

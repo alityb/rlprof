@@ -4,8 +4,8 @@
 #include <iostream>
 #include <string>
 
-#include "rlprof/aggregate.h"
-#include "rlprof/store.h"
+#include "hotpath/aggregate.h"
+#include "hotpath/store.h"
 
 namespace {
 
@@ -20,11 +20,11 @@ void expect_true(bool condition, const std::string& message) {
 
 int main() {
   namespace fs = std::filesystem;
-  const fs::path temp_root = fs::temp_directory_path() / "rlprof_test_aggregate";
+  const fs::path temp_root = fs::temp_directory_path() / "hotpath_test_aggregate";
   fs::remove_all(temp_root);
   fs::create_directories(temp_root);
 
-  rlprof::ProfileData left;
+  hotpath::ProfileData left;
   left.meta = {{"model_name", "Qwen/Qwen3-8B"}, {"gpu_name", "NVIDIA A10G"}};
   left.kernels = {{
       .name = "flash_fwd_splitkv_kernel",
@@ -40,9 +40,9 @@ int main() {
   left.metrics = {{.sample_time = 0.0, .source = "node0", .metric = "vllm:num_requests_running", .value = 2.0}};
   left.traffic_stats = {.total_requests = 4, .completion_length_mean = 10.0, .completion_length_p50 = 8.0, .completion_length_p99 = 12.0, .max_median_ratio = 1.5, .errors = 1, .completion_length_samples = 2};
   const fs::path left_path = temp_root / "left.db";
-  rlprof::save_profile(left_path, left);
+  hotpath::save_profile(left_path, left);
 
-  rlprof::ProfileData right = left;
+  hotpath::ProfileData right = left;
   right.kernels[0].total_ns = 200;
   right.kernels[0].calls = 2;
   right.kernels[0].avg_ns = 100;
@@ -54,9 +54,9 @@ int main() {
   right.traffic_stats.errors = 0;
   right.traffic_stats.completion_length_samples = 5;
   const fs::path right_path = temp_root / "right.db";
-  rlprof::save_profile(right_path, right);
+  hotpath::save_profile(right_path, right);
 
-  const auto aggregate = rlprof::aggregate_profiles({left_path, right_path});
+  const auto aggregate = hotpath::aggregate_profiles({left_path, right_path});
   expect_true(aggregate.kernels.size() == 1, "expected merged kernel");
   expect_true(aggregate.kernels[0].total_ns == 300, "expected summed kernel total");
   expect_true(aggregate.kernels[0].calls == 3, "expected summed kernel calls");

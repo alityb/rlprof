@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-#include "rlprof/profiler/attach.h"
+#include "hotpath/profiler/attach.h"
 
 namespace {
 
@@ -19,7 +19,7 @@ void expect_true(bool condition, const std::string& message) {
 int main() {
   {
     const std::vector<std::string> argv = {
-        "/home/ubuntu/rlprof/.venv/bin/vllm",
+        "/home/ubuntu/hotpath/.venv/bin/vllm",
         "serve",
         "Qwen/Qwen2.5-0.5B-Instruct",
         "--port",
@@ -30,7 +30,7 @@ int main() {
         "4096",
         "--trust-remote-code",
     };
-    const auto parsed = rlprof::profiler::parse_vllm_serve_argv(argv);
+    const auto parsed = hotpath::profiler::parse_vllm_serve_argv(argv);
     expect_true(parsed.has_value(), "expected vllm serve argv to parse");
     expect_true(parsed->model == "Qwen/Qwen2.5-0.5B-Instruct", "expected model");
     expect_true(parsed->port == 8050, "expected port");
@@ -45,18 +45,18 @@ int main() {
         "-m",
         "http.server",
     };
-    const auto parsed = rlprof::profiler::parse_vllm_serve_argv(argv);
+    const auto parsed = hotpath::profiler::parse_vllm_serve_argv(argv);
     expect_true(!parsed.has_value(), "expected non-vllm argv to be rejected");
   }
 
   expect_true(
-      rlprof::profiler::attach_server_is_local("http://127.0.0.1:8050"),
+      hotpath::profiler::attach_server_is_local("http://127.0.0.1:8050"),
       "expected loopback attach server to be local");
   expect_true(
-      rlprof::profiler::attach_server_is_local("http://localhost:8050"),
+      hotpath::profiler::attach_server_is_local("http://localhost:8050"),
       "expected localhost attach server to be local");
   expect_true(
-      !rlprof::profiler::attach_server_is_local("http://example.invalid:8050"),
+      !hotpath::profiler::attach_server_is_local("http://example.invalid:8050"),
       "expected unrelated host to be non-local");
 
   return 0;

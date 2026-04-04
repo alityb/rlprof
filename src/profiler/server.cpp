@@ -1,4 +1,4 @@
-#include "rlprof/profiler/server.h"
+#include "hotpath/profiler/server.h"
 
 #include <array>
 #include <cstdio>
@@ -17,7 +17,7 @@
 #include <regex>
 #include <unistd.h>
 
-namespace rlprof::profiler {
+namespace hotpath::profiler {
 namespace {
 
 ManagedServerState parse_state(const std::filesystem::path& path);
@@ -71,7 +71,7 @@ std::string trim(std::string value) {
 }
 
 std::filesystem::path managed_server_dir() {
-  return std::filesystem::path(".rlprof") / "servers";
+  return std::filesystem::path(".hotpath") / "servers";
 }
 
 std::filesystem::path managed_server_state_path(const std::string& name) {
@@ -103,7 +103,7 @@ std::string vllm_binary() {
 }
 
 std::string make_session_name(const std::string& name) {
-  std::string session = "rlprof_managed_";
+  std::string session = "hotpath_managed_";
   for (unsigned char ch : name) {
     session.push_back(std::isalnum(ch) ? static_cast<char>(ch) : '_');
   }
@@ -302,7 +302,7 @@ ManagedServerState start_managed_server(const ManagedServerConfig& config) {
   }
 
   const std::filesystem::path output_prefix =
-      std::filesystem::path(".rlprof") /
+      std::filesystem::path(".hotpath") /
       ("server_" + config.name + "_" + sanitize_model_name(config.model));
   const std::filesystem::path log_path =
       output_prefix.parent_path() / (output_prefix.stem().string() + "_server.log");
@@ -464,4 +464,4 @@ std::string render_managed_servers(const std::vector<ManagedServerState>& server
   return out.str();
 }
 
-}  // namespace rlprof::profiler
+}  // namespace hotpath::profiler

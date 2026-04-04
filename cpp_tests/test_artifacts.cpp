@@ -4,8 +4,8 @@
 #include <iostream>
 #include <string>
 
-#include "rlprof/artifacts.h"
-#include "rlprof/store.h"
+#include "hotpath/artifacts.h"
+#include "hotpath/store.h"
 
 namespace {
 
@@ -20,11 +20,11 @@ void expect_true(bool condition, const std::string& message) {
 
 int main() {
   namespace fs = std::filesystem;
-  const fs::path temp_root = fs::temp_directory_path() / "rlprof_test_artifacts";
+  const fs::path temp_root = fs::temp_directory_path() / "hotpath_test_artifacts";
   fs::remove_all(temp_root);
   fs::create_directories(temp_root);
 
-  rlprof::ProfileData profile;
+  hotpath::ProfileData profile;
   profile.meta = {
       {"model_name", "Qwen/Qwen3-8B"},
       {"artifact_nsys_rep_path", (temp_root / "sample.nsys-rep").string()},
@@ -41,11 +41,11 @@ int main() {
   };
 
   const fs::path db_path = temp_root / "sample.db";
-  rlprof::save_profile(db_path, profile);
+  hotpath::save_profile(db_path, profile);
   std::ofstream(temp_root / "sample.nsys-rep").put('\n');
   std::ofstream(temp_root / "sample.sqlite").put('\n');
 
-  const auto artifacts = rlprof::profile_artifacts(db_path);
+  const auto artifacts = hotpath::profile_artifacts(db_path);
   expect_true(!artifacts.empty(), "expected artifacts");
   bool saw_db = false;
   bool saw_nsys_rep = false;
@@ -64,7 +64,7 @@ int main() {
   expect_true(saw_nsys_rep, "expected nsys report artifact");
   expect_true(saw_xml, "expected missing xml artifact");
 
-  const auto rendered = rlprof::render_artifacts(db_path, artifacts);
+  const auto rendered = hotpath::render_artifacts(db_path, artifacts);
   expect_true(rendered.find("ARTIFACTS") != std::string::npos, "expected artifacts header");
   expect_true(rendered.find("sample.nsys-rep") != std::string::npos, "expected report path");
 

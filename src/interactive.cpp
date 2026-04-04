@@ -25,10 +25,10 @@
 #include <termios.h>
 #include <unistd.h>
 
-#include "rlprof/bench/runner.h"
-#include "rlprof/clock_control.h"
+#include "hotpath/bench/runner.h"
+#include "hotpath/clock_control.h"
 
-namespace rlprof::interactive {
+namespace hotpath::interactive {
 namespace {
 
 constexpr const char* RESET = "\033[0m";
@@ -79,14 +79,14 @@ std::filesystem::path defaults_path() {
   }
   const char* xdg_state_home = std::getenv("XDG_STATE_HOME");
   if (xdg_state_home != nullptr && std::string(xdg_state_home).size() > 0) {
-    return std::filesystem::path(xdg_state_home) / "rlprof" / "interactive_defaults.cfg";
+    return std::filesystem::path(xdg_state_home) / "hotpath" / "interactive_defaults.cfg";
   }
   const char* home = std::getenv("HOME");
   if (home != nullptr && std::string(home).size() > 0) {
-    return std::filesystem::path(home) / ".local" / "state" / "rlprof" /
+    return std::filesystem::path(home) / ".local" / "state" / "hotpath" /
            "interactive_defaults.cfg";
   }
-  return std::filesystem::path(".rlprof") / "interactive_defaults.cfg";
+  return std::filesystem::path(".hotpath") / "interactive_defaults.cfg";
 }
 
 std::map<std::string, std::string> load_defaults_map() {
@@ -394,18 +394,18 @@ std::string detect_gpu_name() {
 }
 
 bool are_clocks_locked() {
-  const auto info = rlprof::query_clock_policy();
+  const auto info = hotpath::query_clock_policy();
   return info.query_ok && info.gpu_clocks_locked;
 }
 
 std::string clock_status_label() {
-  return rlprof::render_clock_policy(rlprof::query_clock_policy());
+  return hotpath::render_clock_policy(hotpath::query_clock_policy());
 }
 
 std::vector<std::string> list_recent_profiles(int max_count) {
   namespace fs = std::filesystem;
   std::vector<std::pair<fs::file_time_type, std::string>> entries;
-  const fs::path root = ".rlprof";
+  const fs::path root = ".hotpath";
   if (!fs::exists(root)) {
     return {};
   }
@@ -430,7 +430,7 @@ std::vector<std::string> list_recent_profiles(int max_count) {
 std::vector<std::string> list_recent_bench_results(int max_count) {
   namespace fs = std::filesystem;
   std::vector<std::pair<fs::file_time_type, std::string>> entries;
-  const fs::path root = ".rlprof";
+  const fs::path root = ".hotpath";
   if (!fs::exists(root)) {
     return {};
   }
@@ -442,7 +442,7 @@ std::vector<std::string> list_recent_bench_results(int max_count) {
         std::stringstream buffer;
         buffer << stream.rdbuf();
         const auto parsed =
-            rlprof::bench::parse_bench_json(buffer.str());
+            hotpath::bench::parse_bench_json(buffer.str());
         if (!parsed.results.empty()) {
           entries.push_back({entry.last_write_time(), entry.path().string()});
         }
@@ -696,4 +696,4 @@ void run_with_progress(
   }
 }
 
-}  // namespace rlprof::interactive
+}  // namespace hotpath::interactive

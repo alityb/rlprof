@@ -21,24 +21,27 @@
 
 #include <unistd.h>
 
-#include "rlprof/aggregate.h"
-#include "rlprof/diff.h"
-#include "rlprof/doctor.h"
-#include "rlprof/export.h"
-#include "rlprof/artifacts.h"
-#include "rlprof/ops.h"
-#include "rlprof/bench/registry.h"
-#include "rlprof/bench/runner.h"
-#include "rlprof/clock_control.h"
-#include "rlprof/profiler/runner.h"
-#include "rlprof/profiler/server.h"
-#include "rlprof/remote.h"
-#include "rlprof/report.h"
-#include "rlprof/stability.h"
-#include "rlprof/store.h"
-#include "rlprof/targets.h"
-#include "rlprof/traffic.h"
-#include "rlprof/validate.h"
+#include "hotpath/aggregate.h"
+#include "hotpath/diff.h"
+#include "hotpath/doctor.h"
+#include "hotpath/export.h"
+#include "hotpath/artifacts.h"
+#include "hotpath/ops.h"
+#include "hotpath/bench/registry.h"
+#include "hotpath/bench/runner.h"
+#include "hotpath/clock_control.h"
+#include "hotpath/profiler/runner.h"
+#include "hotpath/profiler/server.h"
+#include "hotpath/remote.h"
+#include "hotpath/report.h"
+#include "hotpath/stability.h"
+#include "hotpath/store.h"
+#include "hotpath/targets.h"
+#include "hotpath/traffic.h"
+#include "hotpath/validate.h"
+#include "hotpath/serve_profiler.h"
+#include "hotpath/recommender.h"
+#include "hotpath/disagg_model.h"
 #include "interactive.h"
 
 namespace {
@@ -53,8 +56,8 @@ bool stdout_supports_color() {
 using Args = std::vector<std::string>;
 
 struct ProfileCommandOptions {
-  rlprof::profiler::ProfileConfig config;
-  rlprof::RemoteTarget target;
+  hotpath::profiler::ProfileConfig config;
+  hotpath::RemoteTarget target;
   std::int64_t repeats = 1;
   bool fetch_nsys_rep = false;
   bool assume_yes = false;
@@ -71,7 +74,7 @@ struct BenchCommandOptions {
   double batch_ms_target = 10.0;
   std::string cuda_graph_replay = "off";
   std::string output = "auto";
-  rlprof::RemoteTarget target;
+  hotpath::RemoteTarget target;
   bool assume_yes = false;
   bool show_help = false;
 };
@@ -102,9 +105,9 @@ bool has_positional_arg(const Args& args) {
 
 std::filesystem::path latest_profile_path() {
   namespace fs = std::filesystem;
-  const fs::path dir = ".rlprof";
+  const fs::path dir = ".hotpath";
   if (!fs::exists(dir) || !fs::is_directory(dir)) {
-    throw std::runtime_error("No profile database found in .rlprof/");
+    throw std::runtime_error("No profile database found in .hotpath/");
   }
   fs::path latest;
   std::filesystem::file_time_type latest_time;
@@ -118,7 +121,7 @@ std::filesystem::path latest_profile_path() {
     }
   }
   if (latest.empty()) {
-    throw std::runtime_error("No profile database found in .rlprof/");
+    throw std::runtime_error("No profile database found in .hotpath/");
   }
   return latest;
 }
@@ -137,12 +140,12 @@ std::string sanitize_label(std::string value) {
   return value;
 }
 
-std::filesystem::path repeat_output_base(const rlprof::profiler::ProfileConfig& config) {
+std::filesystem::path repeat_output_base(const hotpath::profiler::ProfileConfig& config) {
   if (!config.output.empty()) {
     return config.output;
   }
   const auto now = std::chrono::system_clock::now().time_since_epoch().count();
-  return std::filesystem::path(".rlprof") /
+  return std::filesystem::path(".hotpath") /
          (sanitize_model_name(config.model) + "_" + std::to_string(now));
 }
 
@@ -168,7 +171,7 @@ std::filesystem::path append_iteration_suffix(
          (base.stem().string() + suffix + base.extension().string());
 }
 
-rlprof::ReportMeta to_report_meta(const std::map<std::string, std::string>& meta) {
+hotpath::ReportMeta to_report_meta(const std::map<std::string, std::string>& meta) {
   const auto get = [&](const std::string& key, const std::string& fallback = "") {
     const auto it = meta.find(key);
     return it == meta.end() ? fallback : it->second;
@@ -178,7 +181,7 @@ rlprof::ReportMeta to_report_meta(const std::map<std::string, std::string>& meta
     return it == meta.end() ? fallback : std::stoll(it->second);
   };
 
-  return rlprof::ReportMeta{
+  return hotpath::ReportMeta{
       .model_name = get("model_name", "unknown-model"),
       .gpu_name = get("gpu_name", "unknown-gpu"),
       .vllm_version = get("vllm_version", "unknown-vllm"),
@@ -249,11 +252,11 @@ std::string with_suffix_remote(
 }
 
 void copy_remote_file_if_present(
-    const rlprof::RemoteTarget& target,
+    const hotpath::RemoteTarget& target,
     const std::string& remote_path,
     const std::filesystem::path& local_path,
     bool required) {
-  if (!command_succeeds(rlprof::remote_file_exists_command(target, remote_path))) {
+  if (!command_succeeds(hotpath::remote_file_exists_command(target, remote_path))) {
     if (required) {
       throw std::runtime_error("missing remote artifact: " + remote_path);
     }
@@ -263,9 +266,9 @@ void copy_remote_file_if_present(
     std::filesystem::create_directories(local_path.parent_path());
   }
   const std::string remote_checksum =
-      trim(run_command_capture(rlprof::remote_checksum_command(target, remote_path)));
+      trim(run_command_capture(hotpath::remote_checksum_command(target, remote_path)));
   for (int attempt = 0; attempt < 3; ++attempt) {
-    const std::string copy = rlprof::remote_copy_from_command(target, remote_path, local_path);
+    const std::string copy = hotpath::remote_copy_from_command(target, remote_path, local_path);
     if (!command_succeeds(copy)) {
       continue;
     }
@@ -282,10 +285,10 @@ void copy_remote_file_if_present(
 
 void rewrite_profile_artifact_paths(
     const std::filesystem::path& local_db_path,
-    const rlprof::RemoteTarget& target,
+    const hotpath::RemoteTarget& target,
     const std::string& remote_db_path,
     bool fetched_nsys_rep) {
-  auto profile = rlprof::load_profile(local_db_path);
+  auto profile = hotpath::load_profile(local_db_path);
   profile.meta["remote_target_host"] = target.host;
   profile.meta["remote_target_workdir"] = target.workdir;
   profile.meta["artifact_db_path"] = local_db_path.string();
@@ -300,11 +303,11 @@ void rewrite_profile_artifact_paths(
   profile.meta["remote_measurement_nvidia_smi_xml"] = with_suffix_remote(remote_db_path, "_nvidia_smi.xml");
   profile.meta["remote_artifact_server_log_path"] = with_suffix_remote(remote_db_path, "_server.log");
   profile.meta["warning_remote_nsys_report_not_fetched"] = fetched_nsys_rep ? "false" : "true";
-  rlprof::save_profile(local_db_path, profile);
+  hotpath::save_profile(local_db_path, profile);
 }
 
 void fetch_remote_profile_artifacts(
-    const rlprof::RemoteTarget& target,
+    const hotpath::RemoteTarget& target,
     const std::filesystem::path& local_db_path,
     const std::string& remote_db_path,
     bool fetch_nsys_rep) {
@@ -348,7 +351,7 @@ std::string trim(std::string value) {
 }
 
 void notify_progress(
-    const rlprof::profiler::ProgressCallback& progress,
+    const hotpath::profiler::ProgressCallback& progress,
     const std::string& status) {
   if (progress) {
     progress(status);
@@ -368,15 +371,15 @@ std::vector<std::string> split_csv_list(const std::string& value) {
   return items;
 }
 
-rlprof::RemoteTarget resolve_cli_target(const rlprof::RemoteTarget& target) {
-  if (!rlprof::has_remote_target(target)) {
+hotpath::RemoteTarget resolve_cli_target(const hotpath::RemoteTarget& target) {
+  if (!hotpath::has_remote_target(target)) {
     return target;
   }
   const std::string override =
-      target.workdir == rlprof::RemoteTarget{}.workdir ? "" : target.workdir;
-  rlprof::RemoteTarget resolved;
+      target.workdir == hotpath::RemoteTarget{}.workdir ? "" : target.workdir;
+  hotpath::RemoteTarget resolved;
   try {
-    resolved = rlprof::resolve_target(target.host, override);
+    resolved = hotpath::resolve_target(target.host, override);
   } catch (const std::runtime_error&) {
     if (override.empty() && target.python_executable.empty() &&
         target.vllm_executable.empty()) {
@@ -384,7 +387,7 @@ rlprof::RemoteTarget resolve_cli_target(const rlprof::RemoteTarget& target) {
     }
     resolved.host = target.host;
     resolved.workdir =
-        override.empty() ? rlprof::RemoteTarget{}.workdir : override;
+        override.empty() ? hotpath::RemoteTarget{}.workdir : override;
   }
   if (!target.python_executable.empty()) {
     resolved.python_executable = target.python_executable;
@@ -525,7 +528,7 @@ std::string optional_json(const std::optional<double>& value) {
   return value.has_value() ? std::to_string(*value) : "null";
 }
 
-std::string render_traffic_json(const rlprof::TrafficStats& stats) {
+std::string render_traffic_json(const hotpath::TrafficStats& stats) {
   return "{"
          "\"total_requests\":" + std::to_string(stats.total_requests) +
          ",\"completion_length_samples\":" + std::to_string(stats.completion_length_samples) +
@@ -646,16 +649,16 @@ void append_profile_invocation_args(
        output_override.empty() ? options.config.output.string() : output_override});
 }
 
-std::pair<std::vector<std::filesystem::path>, std::vector<rlprof::ProfileData>>
+std::pair<std::vector<std::filesystem::path>, std::vector<hotpath::ProfileData>>
 fetch_remote_profile_runs(
-    const rlprof::RemoteTarget& target,
+    const hotpath::RemoteTarget& target,
     const std::filesystem::path& local_output_base,
     const std::string& remote_output_base,
     std::int64_t repeats,
     bool remote_iteration_suffix,
     bool fetch_nsys_rep,
-    const rlprof::profiler::ProgressCallback& progress) {
-  std::vector<std::future<rlprof::ProfileData>> fetch_futures;
+    const hotpath::profiler::ProgressCallback& progress) {
+  std::vector<std::future<hotpath::ProfileData>> fetch_futures;
   fetch_futures.reserve(static_cast<std::size_t>(repeats));
   for (std::int64_t run_index = 1; run_index <= repeats; ++run_index) {
     const std::filesystem::path local_db_path =
@@ -675,12 +678,12 @@ fetch_remote_profile_runs(
         [target, local_db_path, remote_db_path, fetch_nsys_rep]() {
           fetch_remote_profile_artifacts(
               target, local_db_path, remote_db_path, fetch_nsys_rep);
-          return rlprof::load_profile(local_db_path);
+          return hotpath::load_profile(local_db_path);
         }));
   }
 
   std::vector<std::filesystem::path> db_paths;
-  std::vector<rlprof::ProfileData> profiles;
+  std::vector<hotpath::ProfileData> profiles;
   db_paths.reserve(static_cast<std::size_t>(repeats));
   profiles.reserve(static_cast<std::size_t>(repeats));
   for (std::int64_t run_index = 1; run_index <= repeats; ++run_index) {
@@ -698,7 +701,7 @@ fetch_remote_profile_runs(
 
 std::string run_profile_command(
     const ProfileCommandOptions& options,
-    const rlprof::profiler::ProgressCallback& progress = {}) {
+    const hotpath::profiler::ProgressCallback& progress = {}) {
   auto effective_options = options;
   effective_options.target = resolve_cli_target(effective_options.target);
   if (effective_options.config.model.empty()) {
@@ -708,7 +711,7 @@ std::string run_profile_command(
     }
     if (!effective_options.config.managed_server_name.empty()) {
       effective_options.config.model =
-          rlprof::profiler::load_managed_server(
+          hotpath::profiler::load_managed_server(
               effective_options.config.managed_server_name)
               .model;
     } else {
@@ -720,18 +723,18 @@ std::string run_profile_command(
     throw std::runtime_error("--repeat must be > 0");
   }
   if (!effective_options.config.managed_server_name.empty() &&
-      rlprof::has_remote_target(effective_options.target)) {
+      hotpath::has_remote_target(effective_options.target)) {
     throw std::runtime_error("--server is currently local-only and cannot be combined with --target");
   }
-  if (rlprof::has_remote_target(effective_options.target)) {
+  if (hotpath::has_remote_target(effective_options.target)) {
     if (!effective_options.config.attach_server.empty() &&
         effective_options.config.attach_pid <= 0) {
-      auto attach_result = rlprof::profiler::run_profile(effective_options.config, progress);
-      auto attach_profile = rlprof::load_profile(attach_result.db_path);
+      auto attach_result = hotpath::profiler::run_profile(effective_options.config, progress);
+      auto attach_profile = hotpath::load_profile(attach_result.db_path);
       attach_profile.meta["remote_target_host"] = effective_options.target.host;
       attach_profile.meta["remote_target_workdir"] = effective_options.target.workdir;
       attach_profile.meta["warning_remote_attach_metrics_only"] = "true";
-      rlprof::save_profile(attach_result.db_path, attach_profile);
+      hotpath::save_profile(attach_result.db_path, attach_profile);
       std::ostringstream output;
       output << attach_result.db_path.string() << "\n";
       return output.str();
@@ -739,7 +742,7 @@ std::string run_profile_command(
 
     const std::filesystem::path local_output_base = repeat_output_base(effective_options.config);
     const std::string remote_output_base =
-        rlprof::remote_join(effective_options.target, local_output_base);
+        hotpath::remote_join(effective_options.target, local_output_base);
 
     const bool use_fast_remote_repeat =
         effective_options.repeats > 1 &&
@@ -760,10 +763,10 @@ std::string run_profile_command(
 
     notify_progress(progress, "Running remote profile on " + effective_options.target.host + "...");
     try {
-      run_command_capture(rlprof::remote_cli_command(effective_options.target, remote_args));
+      run_command_capture(hotpath::remote_cli_command(effective_options.target, remote_args));
     } catch (const std::exception& exc) {
       const std::string tail = try_run_command_capture(
-          rlprof::remote_tail_command(
+          hotpath::remote_tail_command(
               effective_options.target,
               with_suffix_remote(with_extension(remote_output_base, ".db"), "_server.log"),
               120));
@@ -790,7 +793,7 @@ std::string run_profile_command(
     const auto& final_profile = profiles.back();
     const bool use_color = stdout_supports_color();
     output << "\n";
-    output << rlprof::render_report(
+    output << hotpath::render_report(
         to_report_meta(final_profile.meta),
         final_profile.meta,
         final_profile.kernels,
@@ -799,15 +802,15 @@ std::string run_profile_command(
         use_color);
     if (effective_options.repeats > 1) {
       output << "\n";
-      output << rlprof::render_stability_report(
-          rlprof::compute_stability_report(profiles), use_color);
+      output << hotpath::render_stability_report(
+          hotpath::compute_stability_report(profiles), use_color);
     }
     return output.str();
   }
 
   std::ostringstream output;
   if (effective_options.repeats == 1) {
-    const auto result = rlprof::profiler::run_profile(effective_options.config, progress);
+    const auto result = hotpath::profiler::run_profile(effective_options.config, progress);
     output << result.db_path << "\n";
     return output.str();
   }
@@ -817,19 +820,19 @@ std::string run_profile_command(
     throw std::runtime_error(
         "profile --repeat with attach mode still uses single-run profiling only");
   }
-  const auto results = rlprof::profiler::run_soak_profile(
+  const auto results = hotpath::profiler::run_soak_profile(
       effective_options.config, effective_options.repeats, 0, progress);
-  std::vector<rlprof::ProfileData> profiles;
+  std::vector<hotpath::ProfileData> profiles;
   profiles.reserve(results.size());
   for (const auto& result : results) {
     output << result.db_path << "\n";
-    profiles.push_back(rlprof::load_profile(result.db_path));
+    profiles.push_back(hotpath::load_profile(result.db_path));
   }
 
   const auto& final_profile = profiles.back();
   const bool use_color = stdout_supports_color();
   output << "\n";
-  output << rlprof::render_report(
+  output << hotpath::render_report(
       to_report_meta(final_profile.meta),
       final_profile.meta,
       final_profile.kernels,
@@ -837,8 +840,8 @@ std::string run_profile_command(
       final_profile.traffic_stats,
       use_color);
   output << "\n";
-  output << rlprof::render_stability_report(
-      rlprof::compute_stability_report(profiles), use_color);
+  output << hotpath::render_stability_report(
+      hotpath::compute_stability_report(profiles), use_color);
   return output.str();
 }
 
@@ -846,7 +849,7 @@ int handle_profile(const Args& args) {
   auto options = parse_profile_args(args);
   options.target = resolve_cli_target(options.target);
   if (options.show_help) {
-    std::cout << "Usage: rlprof profile (--model MODEL | --server NAME | --attach URL) [options] [--repeat N]\n"
+    std::cout << "Usage: hotpath profile (--model MODEL | --server NAME | --attach URL) [options] [--repeat N]\n"
               << "       optional: --server NAME --attach URL --attach-pid PID --peer-servers URL1,URL2,...\n"
               << "                 --target HOST --target-workdir DIR\n"
               << "       flags: --discard-first-run --fetch-nsys-rep --yes\n";
@@ -859,8 +862,8 @@ int handle_profile(const Args& args) {
 int handle_report(const Args& args) {
   const std::filesystem::path path =
       args.size() >= 2 ? std::filesystem::path(args[1]) : latest_profile_path();
-  const auto profile = rlprof::load_profile(path);
-  std::cout << rlprof::render_report(
+  const auto profile = hotpath::load_profile(path);
+  std::cout << hotpath::render_report(
       to_report_meta(profile.meta),
       profile.meta,
       profile.kernels,
@@ -872,7 +875,7 @@ int handle_report(const Args& args) {
 
 int handle_aggregate(const Args& args) {
   if (args.size() < 3 || (args.size() > 1 && args[1] == "--help")) {
-    std::cout << "Usage: rlprof aggregate A.db B.db [more.db ...] --output OUT.db\n";
+    std::cout << "Usage: hotpath aggregate A.db B.db [more.db ...] --output OUT.db\n";
     return 0;
   }
   std::vector<std::filesystem::path> inputs;
@@ -887,16 +890,16 @@ int handle_aggregate(const Args& args) {
   if (inputs.size() < 2 || output.empty()) {
     throw std::runtime_error("aggregate requires at least two input dbs and --output");
   }
-  auto aggregate = rlprof::aggregate_profiles(inputs);
+  auto aggregate = hotpath::aggregate_profiles(inputs);
   aggregate.meta["artifact_db_path"] = output.string();
-  rlprof::save_profile(output, aggregate);
+  hotpath::save_profile(output, aggregate);
   std::cout << output.string() << "\n";
   return 0;
 }
 
 int handle_export(const Args& args) {
   if (args.size() > 1 && args[1] == "--help") {
-    std::cout << "Usage: rlprof export [path] --format csv|json\n";
+    std::cout << "Usage: hotpath export [path] --format csv|json\n";
     return 0;
   }
   std::filesystem::path path;
@@ -916,7 +919,7 @@ int handle_export(const Args& args) {
     path = latest_profile_path();
   }
 
-  for (const auto& output : rlprof::export_profile(path, format)) {
+  for (const auto& output : hotpath::export_profile(path, format)) {
     std::cout << output.string() << "\n";
   }
   return 0;
@@ -924,30 +927,30 @@ int handle_export(const Args& args) {
 
 int handle_validate(const Args& args) {
   if (args.size() > 1 && args[1] == "--help") {
-    std::cout << "Usage: rlprof validate [path]\n";
+    std::cout << "Usage: hotpath validate [path]\n";
     return 0;
   }
   const std::filesystem::path path =
       args.size() >= 2 ? std::filesystem::path(args[1]) : latest_profile_path();
-  const auto checks = rlprof::validate_profile(path);
-  std::cout << rlprof::render_validation_report(path, checks, stdout_supports_color());
+  const auto checks = hotpath::validate_profile(path);
+  std::cout << hotpath::render_validation_report(path, checks, stdout_supports_color());
   return 0;
 }
 
 int handle_artifacts(const Args& args) {
   if (args.size() > 1 && args[1] == "--help") {
-    std::cout << "Usage: rlprof artifacts [path]\n";
+    std::cout << "Usage: hotpath artifacts [path]\n";
     return 0;
   }
   const std::filesystem::path path =
       args.size() >= 2 ? std::filesystem::path(args[1]) : latest_profile_path();
-  std::cout << rlprof::render_artifacts(path, rlprof::profile_artifacts(path));
+  std::cout << hotpath::render_artifacts(path, hotpath::profile_artifacts(path));
   return 0;
 }
 
 int handle_trace(const Args& args) {
   if (args.size() > 1 && args[1] == "--help") {
-    std::cout << "Usage: rlprof trace [path] [--open]\n";
+    std::cout << "Usage: hotpath trace [path] [--open]\n";
     return 0;
   }
   std::filesystem::path path;
@@ -963,11 +966,11 @@ int handle_trace(const Args& args) {
     path = latest_profile_path();
   }
 
-  const auto profile = rlprof::load_profile(path);
+  const auto profile = hotpath::load_profile(path);
   const bool metrics_only =
       profile.meta.contains("warning_no_kernel_trace") &&
       profile.meta.at("warning_no_kernel_trace") == "true";
-  const auto artifacts = rlprof::trace_artifacts(path);
+  const auto artifacts = hotpath::trace_artifacts(path);
   if (open) {
     for (const auto& artifact : artifacts) {
       if (artifact.kind == "nsys report" && artifact.exists) {
@@ -990,13 +993,13 @@ int handle_trace(const Args& args) {
     throw std::runtime_error("no nsys report artifact available to open");
   }
 
-  std::cout << rlprof::render_trace_artifacts(path, artifacts, metrics_only);
+  std::cout << hotpath::render_trace_artifacts(path, artifacts, metrics_only);
   return 0;
 }
 
 int handle_manifest(const Args& args) {
   if (args.size() > 1 && args[1] == "--help") {
-    std::cout << "Usage: rlprof manifest [path] [--output PATH|auto]\n";
+    std::cout << "Usage: hotpath manifest [path] [--output PATH|auto]\n";
     return 0;
   }
   std::filesystem::path path;
@@ -1014,12 +1017,12 @@ int handle_manifest(const Args& args) {
   if (path.empty()) {
     path = latest_profile_path();
   }
-  std::cout << rlprof::write_manifest(path, output).string() << "\n";
+  std::cout << hotpath::write_manifest(path, output).string() << "\n";
   return 0;
 }
 
 int handle_cleanup(const Args& args) {
-  std::filesystem::path dir = ".rlprof";
+  std::filesystem::path dir = ".hotpath";
   int keep = 10;
   bool compress = false;
   bool apply = false;
@@ -1033,17 +1036,17 @@ int handle_cleanup(const Args& args) {
     } else if (args[i] == "--apply") {
       apply = true;
     } else if (args[i] == "--help") {
-      std::cout << "Usage: rlprof cleanup [--dir DIR] [--keep N] [--compress] [--apply]\n";
+      std::cout << "Usage: hotpath cleanup [--dir DIR] [--keep N] [--compress] [--apply]\n";
       return 0;
     }
   }
-  std::cout << rlprof::cleanup_artifacts(dir, keep, compress, apply);
+  std::cout << hotpath::cleanup_artifacts(dir, keep, compress, apply);
   return 0;
 }
 
 int handle_cluster_profile(const Args& args) {
   if (args.size() > 1 && args[1] == "--help") {
-    std::cout << "Usage: rlprof cluster-profile --targets T1,T2 [profile options] --output BASE [--allow-duplicate-hosts]\n";
+    std::cout << "Usage: hotpath cluster-profile --targets T1,T2 [profile options] --output BASE [--allow-duplicate-hosts]\n";
     return 0;
   }
   std::string targets_csv;
@@ -1089,7 +1092,7 @@ int handle_cluster_profile(const Args& args) {
     run_options.config.output =
         options.config.output.string() + "_" + sanitize_label(target_spec);
     target_now_ms.push_back(std::stoll(trim(
-        run_command_capture(rlprof::remote_epoch_ms_command(run_options.target)))));
+        run_command_capture(hotpath::remote_epoch_ms_command(run_options.target)))));
     run_options_list.push_back(run_options);
   }
   if (!allow_duplicate_hosts && distinct_hosts.size() != targets.size()) {
@@ -1120,7 +1123,7 @@ int handle_cluster_profile(const Args& args) {
     std::cout << future.get();
   }
 
-  auto aggregate = rlprof::aggregate_profiles(outputs);
+  auto aggregate = hotpath::aggregate_profiles(outputs);
   aggregate.meta["aggregate_profile_count"] = std::to_string(outputs.size());
   aggregate.meta["aggregation_scope"] = "cluster_controller";
   aggregate.meta["cluster_synchronized_start"] = "true";
@@ -1131,14 +1134,14 @@ int handle_cluster_profile(const Args& args) {
   const std::filesystem::path aggregate_path =
       options.config.output.string() + "_aggregate.db";
   aggregate.meta["artifact_db_path"] = aggregate_path.string();
-  rlprof::save_profile(aggregate_path, aggregate);
+  hotpath::save_profile(aggregate_path, aggregate);
   std::cout << aggregate_path.string() << "\n";
   return 0;
 }
 
 int handle_soak_profile(const Args& args) {
   if (args.size() > 1 && args[1] == "--help") {
-    std::cout << "Usage: rlprof soak-profile [profile options] --iterations N --output BASE [--pause-sec N] [--validate-each]\n";
+    std::cout << "Usage: hotpath soak-profile [profile options] --iterations N --output BASE [--pause-sec N] [--validate-each]\n";
     return 0;
   }
   int iterations = 5;
@@ -1168,10 +1171,10 @@ int handle_soak_profile(const Args& args) {
   }
 
   options.target = resolve_cli_target(options.target);
-  if (rlprof::has_remote_target(options.target)) {
+  if (hotpath::has_remote_target(options.target)) {
     const std::filesystem::path local_output_base = repeat_output_base(options.config);
     const std::string remote_output_base =
-        rlprof::remote_join(options.target, local_output_base);
+        hotpath::remote_join(options.target, local_output_base);
     Args remote_args = {"soak-profile"};
     append_profile_invocation_args(remote_args, options, false, remote_output_base);
     remote_args.insert(remote_args.end(), {"--iterations", std::to_string(iterations)});
@@ -1185,10 +1188,10 @@ int handle_soak_profile(const Args& args) {
         {},
         "Running remote soak profile on " + options.target.host + "...");
     try {
-      run_command_capture(rlprof::remote_cli_command(options.target, remote_args));
+      run_command_capture(hotpath::remote_cli_command(options.target, remote_args));
     } catch (const std::exception& exc) {
       const std::string tail = try_run_command_capture(
-          rlprof::remote_tail_command(
+          hotpath::remote_tail_command(
               options.target,
               with_suffix_remote(with_extension(remote_output_base, ".db"), "_server.log"),
               120));
@@ -1209,9 +1212,9 @@ int handle_soak_profile(const Args& args) {
     for (const auto& db_path : db_paths) {
       std::cout << db_path.string() << "\n";
       if (validate_each) {
-        const auto checks = rlprof::validate_profile(db_path);
+        const auto checks = hotpath::validate_profile(db_path);
         for (const auto& check : checks) {
-          if (check.status == rlprof::ValidationStatus::kFail) {
+          if (check.status == hotpath::ValidationStatus::kFail) {
             throw std::runtime_error(
                 "soak validation failed for " + db_path.string() + ": " + check.name);
           }
@@ -1230,9 +1233,9 @@ int handle_soak_profile(const Args& args) {
       std::filesystem::path db_path = run_options.config.output;
       db_path.replace_extension(".db");
       if (validate_each) {
-        const auto checks = rlprof::validate_profile(db_path);
+        const auto checks = hotpath::validate_profile(db_path);
         for (const auto& check : checks) {
-          if (check.status == rlprof::ValidationStatus::kFail) {
+          if (check.status == hotpath::ValidationStatus::kFail) {
             throw std::runtime_error(
                 "soak validation failed for " + db_path.string() + ": " + check.name);
           }
@@ -1246,13 +1249,13 @@ int handle_soak_profile(const Args& args) {
   }
 
   const auto results =
-      rlprof::profiler::run_soak_profile(options.config, iterations, pause_sec, {});
+      hotpath::profiler::run_soak_profile(options.config, iterations, pause_sec, {});
   for (const auto& result : results) {
     std::cout << result.db_path.string() << "\n";
     if (validate_each) {
-      const auto checks = rlprof::validate_profile(result.db_path);
+      const auto checks = hotpath::validate_profile(result.db_path);
       for (const auto& check : checks) {
-        if (check.status == rlprof::ValidationStatus::kFail) {
+        if (check.status == hotpath::ValidationStatus::kFail) {
           throw std::runtime_error(
               "soak validation failed for " + result.db_path.string() + ": " + check.name);
         }
@@ -1266,42 +1269,42 @@ int handle_diff(const Args& args) {
   if (args.size() < 3) {
     throw std::runtime_error("diff requires two database paths");
   }
-  std::cout << rlprof::render_diff(args[1], args[2], stdout_supports_color());
+  std::cout << hotpath::render_diff(args[1], args[2], stdout_supports_color());
   return 0;
 }
 
 int handle_doctor(const Args& args) {
-  rlprof::RemoteTarget target;
+  hotpath::RemoteTarget target;
   for (std::size_t i = 1; i < args.size(); ++i) {
     if (args[i] == "--target") {
       target.host = require_value(args, i, "--target");
     } else if (args[i] == "--target-workdir") {
       target.workdir = require_value(args, i, "--target-workdir");
     } else if (args[i] == "--help") {
-      std::cout << "Usage: rlprof doctor [--target HOST] [--target-workdir DIR]\n";
+      std::cout << "Usage: hotpath doctor [--target HOST] [--target-workdir DIR]\n";
       return 0;
     }
   }
   target = resolve_cli_target(target);
-  if (rlprof::has_remote_target(target)) {
+  if (hotpath::has_remote_target(target)) {
     std::cout << run_command_capture(
-        rlprof::remote_cli_command(target, {"doctor"}));
+        hotpath::remote_cli_command(target, {"doctor"}));
     return 0;
   }
-  std::cout << rlprof::render_doctor_report(rlprof::run_doctor(), stdout_supports_color());
+  std::cout << hotpath::render_doctor_report(hotpath::run_doctor(), stdout_supports_color());
   return 0;
 }
 
 int handle_server(const Args& args) {
   if (args.size() == 1 || (args.size() > 1 && args[1] == "--help")) {
-    std::cout << "Usage: rlprof server <start|stop|list|show|prune> ...\n";
+    std::cout << "Usage: hotpath server <start|stop|list|show|prune> ...\n";
     return 0;
   }
 
   const std::string action = args[1];
   if (action == "list") {
-    std::cout << rlprof::profiler::render_managed_servers(
-        rlprof::profiler::list_managed_servers());
+    std::cout << hotpath::profiler::render_managed_servers(
+        hotpath::profiler::list_managed_servers());
     return 0;
   }
 
@@ -1309,7 +1312,7 @@ int handle_server(const Args& args) {
     if (args.size() < 3) {
       throw std::runtime_error("server show requires NAME");
     }
-    const auto state = rlprof::profiler::find_managed_server(args[2]);
+    const auto state = hotpath::profiler::find_managed_server(args[2]);
     if (!state.has_value()) {
       throw std::runtime_error("unknown managed server: " + args[2]);
     }
@@ -1321,13 +1324,13 @@ int handle_server(const Args& args) {
     std::cout << "max_model_len: " << state->max_model_len << "\n";
     std::cout << "session: " << state->session_name << "\n";
     std::cout << "pid: " << state->pid << "\n";
-    std::cout << "ready: " << (rlprof::profiler::managed_server_ready(*state) ? "yes" : "no") << "\n";
+    std::cout << "ready: " << (hotpath::profiler::managed_server_ready(*state) ? "yes" : "no") << "\n";
     std::cout << "log: " << state->log_path.string() << "\n";
     return 0;
   }
 
   if (action == "start") {
-    rlprof::profiler::ManagedServerConfig config;
+    hotpath::profiler::ManagedServerConfig config;
     for (std::size_t i = 2; i < args.size(); ++i) {
       if (args[i] == "--name") {
         config.name = require_value(args, i, "--name");
@@ -1345,7 +1348,7 @@ int handle_server(const Args& args) {
         config.startup_timeout_s = std::stoll(require_value(args, i, "--startup-timeout-s"));
       }
     }
-    const auto state = rlprof::profiler::start_managed_server(config);
+    const auto state = hotpath::profiler::start_managed_server(config);
     std::cout << state.name << "\n";
     std::cout << state.server_url << "\n";
     return 0;
@@ -1355,17 +1358,17 @@ int handle_server(const Args& args) {
     if (args.size() < 3) {
       throw std::runtime_error("server stop requires NAME");
     }
-    const auto state = rlprof::profiler::find_managed_server(args[2]);
+    const auto state = hotpath::profiler::find_managed_server(args[2]);
     if (!state.has_value()) {
       throw std::runtime_error("unknown managed server: " + args[2]);
     }
-    rlprof::profiler::stop_managed_server(*state);
+    hotpath::profiler::stop_managed_server(*state);
     std::cout << "Stopped " << state->name << "\n";
     return 0;
   }
 
   if (action == "prune") {
-    const auto removed = rlprof::profiler::prune_stale_managed_servers();
+    const auto removed = hotpath::profiler::prune_stale_managed_servers();
     std::cout << "Pruned " << removed << " stale managed server"
               << (removed == 1 ? "" : "s") << "\n";
     return 0;
@@ -1376,13 +1379,13 @@ int handle_server(const Args& args) {
 
 int handle_target(const Args& args) {
   if (args.size() == 1 || (args.size() > 1 && args[1] == "--help")) {
-    std::cout << "Usage: rlprof target <add|list|remove|show|bootstrap> ...\n";
+    std::cout << "Usage: hotpath target <add|list|remove|show|bootstrap> ...\n";
     return 0;
   }
 
   const std::string action = args[1];
   if (action == "list") {
-    std::cout << rlprof::render_targets(rlprof::list_targets());
+    std::cout << hotpath::render_targets(hotpath::list_targets());
     return 0;
   }
 
@@ -1390,7 +1393,7 @@ int handle_target(const Args& args) {
     if (args.size() < 3) {
       throw std::runtime_error("target add requires NAME");
     }
-    rlprof::SavedTarget target{
+    hotpath::SavedTarget target{
         .name = args[2],
     };
     for (std::size_t i = 3; i < args.size(); ++i) {
@@ -1407,7 +1410,7 @@ int handle_target(const Args& args) {
     if (target.host.empty()) {
       throw std::runtime_error("target add requires --host");
     }
-    rlprof::save_target(target);
+    hotpath::save_target(target);
     std::cout << "Saved target " << target.name << " -> " << target.host << "\n";
     return 0;
   }
@@ -1416,7 +1419,7 @@ int handle_target(const Args& args) {
     if (args.size() < 3) {
       throw std::runtime_error("target remove requires NAME");
     }
-    if (!rlprof::remove_target(args[2])) {
+    if (!hotpath::remove_target(args[2])) {
       throw std::runtime_error("unknown target: " + args[2]);
     }
     std::cout << "Removed target " << args[2] << "\n";
@@ -1427,7 +1430,7 @@ int handle_target(const Args& args) {
     if (args.size() < 3) {
       throw std::runtime_error("target show requires NAME");
     }
-    const auto target = rlprof::resolve_target(args[2]);
+    const auto target = hotpath::resolve_target(args[2]);
     std::cout << "name: " << args[2] << "\n";
     std::cout << "host: " << target.host << "\n";
     std::cout << "workdir: " << target.workdir << "\n";
@@ -1456,28 +1459,28 @@ int handle_target(const Args& args) {
         vllm_executable = require_value(args, i, "--vllm");
       }
     }
-    rlprof::RemoteTarget target{
+    hotpath::RemoteTarget target{
         .host = args[2],
-        .workdir = workdir.empty() ? rlprof::RemoteTarget{}.workdir : workdir,
+        .workdir = workdir.empty() ? hotpath::RemoteTarget{}.workdir : workdir,
         .python_executable = python_executable,
         .vllm_executable = vllm_executable,
     };
     target = resolve_cli_target(target);
     try {
       std::cout << run_command_capture(
-          rlprof::remote_shell_command(target, remote_bootstrap_check_script()));
+          hotpath::remote_shell_command(target, remote_bootstrap_check_script()));
     } catch (const std::exception& exc) {
       throw std::runtime_error(
           "remote bootstrap preflight failed for " + target.host + "\n\n" + exc.what());
     }
     const auto command =
-        rlprof::bootstrap_target_command(target, std::filesystem::current_path().string());
+        hotpath::bootstrap_target_command(target, std::filesystem::current_path().string());
     const int rc = std::system(command.c_str());
     if (rc != 0) {
       throw std::runtime_error("remote bootstrap failed for " + target.host);
     }
     const auto doctor_output = run_command_capture(
-        rlprof::remote_cli_command(target, {"doctor"}));
+        hotpath::remote_cli_command(target, {"doctor"}));
     std::cout << doctor_output;
     if (doctor_output.find("FAIL") != std::string::npos) {
       throw std::runtime_error("remote bootstrap validation failed for " + target.host);
@@ -1490,7 +1493,7 @@ int handle_target(const Args& args) {
 }
 
 int handle_recover(const Args& args) {
-  rlprof::RemoteTarget target;
+  hotpath::RemoteTarget target;
   std::string remote_db_path;
   std::filesystem::path local_output;
   for (std::size_t i = 1; i < args.size(); ++i) {
@@ -1503,12 +1506,12 @@ int handle_recover(const Args& args) {
     } else if (args[i] == "--output") {
       local_output = require_value(args, i, "--output");
     } else if (args[i] == "--help") {
-      std::cout << "Usage: rlprof recover --target HOST --remote-db REMOTE.db --output LOCAL.db [--target-workdir DIR]\n";
+      std::cout << "Usage: hotpath recover --target HOST --remote-db REMOTE.db --output LOCAL.db [--target-workdir DIR]\n";
       return 0;
     }
   }
   target = resolve_cli_target(target);
-  if (!rlprof::has_remote_target(target) || remote_db_path.empty() || local_output.empty()) {
+  if (!hotpath::has_remote_target(target) || remote_db_path.empty() || local_output.empty()) {
     throw std::runtime_error("recover requires --target, --remote-db, and --output");
   }
   fetch_remote_profile_artifacts(target, local_output, remote_db_path, true);
@@ -1518,14 +1521,14 @@ int handle_recover(const Args& args) {
 
 int handle_bench_compare(const Args& args) {
   if (args.size() < 3 || (args.size() > 1 && args[1] == "--help")) {
-    std::cout << "Usage: rlprof bench-compare A.json B.json\n";
+    std::cout << "Usage: hotpath bench-compare A.json B.json\n";
     return 0;
   }
-  const auto left = rlprof::bench::parse_bench_json(
+  const auto left = hotpath::bench::parse_bench_json(
       run_command_capture("cat " + shell_escape(args[1])));
-  const auto right = rlprof::bench::parse_bench_json(
+  const auto right = hotpath::bench::parse_bench_json(
       run_command_capture("cat " + shell_escape(args[2])));
-  std::cout << rlprof::bench::render_bench_comparison(left, right);
+  std::cout << hotpath::bench::render_bench_comparison(left, right);
   return 0;
 }
 
@@ -1582,14 +1585,14 @@ int handle_traffic(const Args& args) {
     throw std::runtime_error("--min-tokens must be <= --max-tokens");
   }
 
-  const auto run = rlprof::fire_rl_traffic(
+  const auto run = hotpath::fire_rl_traffic(
       servers, prompts, rollouts_per_prompt, min_tokens, max_tokens, input_len);
   std::cout << render_traffic_json(run.stats);
   return 0;
 }
 
-rlprof::interactive::ProfileConfig profile_interactive_defaults(const Args& args) {
-  auto config = rlprof::interactive::load_profile_defaults();
+hotpath::interactive::ProfileConfig profile_interactive_defaults(const Args& args) {
+  auto config = hotpath::interactive::load_profile_defaults();
   for (std::size_t i = 1; i < args.size(); ++i) {
     if (args[i] == "--model") {
       config.model = require_value(args, i, "--model");
@@ -1636,7 +1639,7 @@ std::string bench_helper_command(
       configured_python != nullptr && std::string(configured_python).size() > 0
           ? std::string(configured_python)
           : (std::filesystem::exists(".venv/bin/python") ? ".venv/bin/python" : "python3");
-  return shell_escape(python) + " -m " + shell_escape("rlprof_py.bench_cuda") +
+  return shell_escape(python) + " -m " + shell_escape("hotpath_py.bench_cuda") +
         " --kernel " + shell_escape(kernel) +
         " --shapes " + shell_escape(shapes) +
         " --dtype " + shell_escape(dtype) +
@@ -1657,7 +1660,7 @@ bool gpu_bench_available() {
   const std::string probe =
       shell_escape(python) + " -c " +
       shell_escape(
-          "import torch, vllm, rlprof_py.bench_cuda; raise SystemExit(0 if torch.cuda.is_available() else 1)") +
+          "import torch, vllm, hotpath_py.bench_cuda; raise SystemExit(0 if torch.cuda.is_available() else 1)") +
       " > /dev/null 2>&1";
   return std::system(probe.c_str()) == 0;
 }
@@ -1704,16 +1707,16 @@ std::string run_bench_command(const BenchCommandOptions& options) {
     throw std::runtime_error("--kernel is required");
   }
 
-  if (rlprof::has_remote_target(effective_options.target)) {
+  if (hotpath::has_remote_target(effective_options.target)) {
     std::filesystem::path local_output_path =
-        rlprof::bench::resolve_bench_output_path(effective_options.kernel, effective_options.output);
+        hotpath::bench::resolve_bench_output_path(effective_options.kernel, effective_options.output);
     if (local_output_path.empty()) {
       local_output_path =
-          rlprof::bench::resolve_bench_output_path(effective_options.kernel, "auto");
+          hotpath::bench::resolve_bench_output_path(effective_options.kernel, "auto");
     }
     const std::string remote_output_path =
         local_output_path.empty() ? "none"
-                                  : rlprof::remote_join(effective_options.target, local_output_path);
+                                  : hotpath::remote_join(effective_options.target, local_output_path);
     Args remote_args = {
         "bench",
         "--kernel",
@@ -1735,14 +1738,14 @@ std::string run_bench_command(const BenchCommandOptions& options) {
         "--output",
         remote_output_path,
     };
-    run_command_capture(rlprof::remote_cli_command(effective_options.target, remote_args));
+    run_command_capture(hotpath::remote_cli_command(effective_options.target, remote_args));
     copy_remote_file_if_present(effective_options.target, remote_output_path, local_output_path, true);
     const auto output =
-        rlprof::bench::parse_bench_json(run_command_capture(
+        hotpath::bench::parse_bench_json(run_command_capture(
             "cat " + shell_escape(local_output_path.string())));
     std::ostringstream rendered;
     rendered << "saved: " << local_output_path.string() << "\n";
-    rendered << rlprof::bench::render_bench_output(output);
+    rendered << hotpath::bench::render_bench_output(output);
     return rendered.str();
   }
 
@@ -1757,9 +1760,9 @@ std::string run_bench_command(const BenchCommandOptions& options) {
             effective_options.repeats,
             effective_options.batch_ms_target,
             effective_options.cuda_graph_replay));
-    const auto output = rlprof::bench::parse_bench_json(raw_json);
+    const auto output = hotpath::bench::parse_bench_json(raw_json);
     const auto output_path =
-        rlprof::bench::resolve_bench_output_path(effective_options.kernel, effective_options.output);
+        hotpath::bench::resolve_bench_output_path(effective_options.kernel, effective_options.output);
     std::ostringstream rendered;
     if (!output_path.empty()) {
       std::filesystem::create_directories(output_path.parent_path());
@@ -1767,20 +1770,20 @@ std::string run_bench_command(const BenchCommandOptions& options) {
       out << raw_json;
       rendered << "saved: " << output_path.string() << "\n";
     }
-    rendered << rlprof::bench::render_bench_output(output);
+    rendered << hotpath::bench::render_bench_output(output);
     return rendered.str();
   }
 
   std::ostringstream output;
   output << "warning: torch/vllm CUDA bench helper unavailable, falling back to native CPU stubs\n";
-  rlprof::bench::register_builtin_kernels();
-  const auto results = rlprof::bench::benchmark_category(
+  hotpath::bench::register_builtin_kernels();
+  const auto results = hotpath::bench::benchmark_category(
       options.kernel,
-      rlprof::bench::parse_shapes(effective_options.shapes),
+      hotpath::bench::parse_shapes(effective_options.shapes),
       effective_options.dtype,
       effective_options.warmup,
       effective_options.n_iter);
-  const rlprof::bench::BenchRunOutput run_output{
+  const hotpath::bench::BenchRunOutput run_output{
       .gpu = std::nullopt,
       .results = results,
       .correctness_failures = {},
@@ -1788,14 +1791,14 @@ std::string run_bench_command(const BenchCommandOptions& options) {
       .environment_warnings = {},
   };
   const auto output_path =
-      rlprof::bench::resolve_bench_output_path(effective_options.kernel, effective_options.output);
+      hotpath::bench::resolve_bench_output_path(effective_options.kernel, effective_options.output);
   if (!output_path.empty()) {
     std::filesystem::create_directories(output_path.parent_path());
     std::ofstream out(output_path);
-    out << rlprof::bench::serialize_bench_output_json(run_output);
+    out << hotpath::bench::serialize_bench_output_json(run_output);
     output << "saved: " << output_path.string() << "\n";
   }
-  output << rlprof::bench::render_bench_output(run_output);
+  output << hotpath::bench::render_bench_output(run_output);
   return output.str();
 }
 
@@ -1803,7 +1806,7 @@ int handle_bench(const Args& args) {
   auto options = parse_bench_args(args);
   options.target = resolve_cli_target(options.target);
   if (options.show_help) {
-    std::cout << "Usage: rlprof bench --kernel NAME --shapes SPEC [options]\n"
+    std::cout << "Usage: hotpath bench --kernel NAME --shapes SPEC [options]\n"
               << "       flags: --yes\n"
               << "       timing: --batch-ms-target FLOAT --cuda-graph-replay off|on\n"
               << "       remote: --target HOST --target-workdir DIR\n"
@@ -1814,8 +1817,8 @@ int handle_bench(const Args& args) {
   return 0;
 }
 
-rlprof::interactive::BenchConfig bench_interactive_defaults(const Args& args) {
-  auto config = rlprof::interactive::load_bench_defaults();
+hotpath::interactive::BenchConfig bench_interactive_defaults(const Args& args) {
+  auto config = hotpath::interactive::load_bench_defaults();
   for (std::size_t i = 1; i < args.size(); ++i) {
     if (args[i] == "--kernel") {
       config.kernel = require_value(args, i, "--kernel");
@@ -1840,34 +1843,34 @@ int handle_lock_clocks(const Args& args) {
     if (args[i] == "--freq") {
       freq_mhz = std::stoll(require_value(args, i, "--freq"));
     } else if (args[i] == "--help") {
-      std::cout << "Usage: rlprof lock-clocks [--freq MHZ]\n";
+      std::cout << "Usage: hotpath lock-clocks [--freq MHZ]\n";
       return 0;
     }
   }
 
-  rlprof::lock_gpu_clocks(freq_mhz);
+  hotpath::lock_gpu_clocks(freq_mhz);
   const std::int64_t effective_freq =
-      freq_mhz.value_or(rlprof::query_max_sm_clock_mhz());
+      freq_mhz.value_or(hotpath::query_max_sm_clock_mhz());
   std::cout << "GPU clocks locked to " << effective_freq << " MHz\n";
   return 0;
 }
 
 int handle_unlock_clocks(const Args& args) {
   if (args.size() > 1 && args[1] == "--help") {
-    std::cout << "Usage: rlprof unlock-clocks\n";
+    std::cout << "Usage: hotpath unlock-clocks\n";
     return 0;
   }
-  rlprof::unlock_gpu_clocks();
+  hotpath::unlock_gpu_clocks();
   std::cout << "GPU clocks unlocked\n";
   return 0;
 }
 
 int handle_reset_defaults(const Args& args) {
   if (args.size() > 1 && args[1] == "--help") {
-    std::cout << "Usage: rlprof reset-defaults\n";
+    std::cout << "Usage: hotpath reset-defaults\n";
     return 0;
   }
-  rlprof::interactive::clear_saved_defaults();
+  hotpath::interactive::clear_saved_defaults();
   std::cout << "Interactive defaults cleared\n";
   return 0;
 }
@@ -1898,10 +1901,10 @@ std::string format_recent_profile_option(const std::string& path, bool include_t
 std::optional<std::string> choose_recent_profile(
     const std::string& header,
     bool include_timestamp) {
-  rlprof::interactive::print_header(header);
-  const auto profiles = rlprof::interactive::list_recent_profiles(10);
+  hotpath::interactive::print_header(header);
+  const auto profiles = hotpath::interactive::list_recent_profiles(10);
   if (profiles.empty()) {
-    rlprof::interactive::print_warning("No profiles found in .rlprof/");
+    hotpath::interactive::print_warning("No profiles found in .hotpath/");
     return std::nullopt;
   }
   std::vector<std::string> options;
@@ -1910,7 +1913,7 @@ std::optional<std::string> choose_recent_profile(
     options.push_back(format_recent_profile_option(path, include_timestamp));
   }
   const auto choice =
-      rlprof::interactive::prompt_choice("Recent profiles", options, 0);
+      hotpath::interactive::prompt_choice("Recent profiles", options, 0);
   if (!choice.has_value()) {
     return std::nullopt;
   }
@@ -1920,10 +1923,10 @@ std::optional<std::string> choose_recent_profile(
 std::optional<std::string> choose_recent_bench_result(
     const std::string& header,
     bool include_timestamp) {
-  rlprof::interactive::print_header(header);
-  const auto results = rlprof::interactive::list_recent_bench_results(10);
+  hotpath::interactive::print_header(header);
+  const auto results = hotpath::interactive::list_recent_bench_results(10);
   if (results.empty()) {
-    rlprof::interactive::print_warning("No bench results found in .rlprof/");
+    hotpath::interactive::print_warning("No bench results found in .hotpath/");
     return std::nullopt;
   }
   std::vector<std::string> options;
@@ -1932,7 +1935,7 @@ std::optional<std::string> choose_recent_bench_result(
     options.push_back(format_recent_profile_option(path, include_timestamp));
   }
   const auto choice =
-      rlprof::interactive::prompt_choice("Recent bench results", options, 0);
+      hotpath::interactive::prompt_choice("Recent bench results", options, 0);
   if (!choice.has_value()) {
     return std::nullopt;
   }
@@ -1940,59 +1943,59 @@ std::optional<std::string> choose_recent_bench_result(
 }
 
 int execute_profile_config(
-    const rlprof::interactive::ProfileConfig& config,
+    const hotpath::interactive::ProfileConfig& config,
     bool confirm_start,
     bool persist_defaults) {
   if (config.model.empty()) {
     throw std::runtime_error("profile requires a model");
   }
 
-  const std::string gpu_name = rlprof::interactive::detect_gpu_name();
-  const std::string clock_status = rlprof::interactive::clock_status_label();
-  const bool clocks_locked = rlprof::interactive::are_clocks_locked();
+  const std::string gpu_name = hotpath::interactive::detect_gpu_name();
+  const std::string clock_status = hotpath::interactive::clock_status_label();
+  const bool clocks_locked = hotpath::interactive::are_clocks_locked();
 
   std::cout << "\n";
-  rlprof::interactive::print_info(
+  hotpath::interactive::print_info(
       "-> " + config.model + " · " + std::to_string(config.prompts) + " prompts x " +
           std::to_string(config.rollouts) + " rollouts · " +
           std::to_string(config.min_tokens) + "-" + std::to_string(config.max_tokens) +
           " tokens",
       "");
-  rlprof::interactive::print_info(
+  hotpath::interactive::print_info(
       "-> " + gpu_name + " · clocks: " + clock_status,
       "");
   if (!trim(config.peer_servers).empty()) {
     const auto peers = split_csv_list(config.peer_servers);
-    rlprof::interactive::print_info(
+    hotpath::interactive::print_info(
         "-> cluster endpoints: " + std::to_string(peers.size() + 1),
         "");
   }
   if (config.discard_first_run) {
-    rlprof::interactive::print_info("-> discard first run", "enabled");
+    hotpath::interactive::print_info("-> discard first run", "enabled");
   }
   if (!clocks_locked) {
-    rlprof::interactive::print_warning(
-        "GPU clocks unlocked - run `rlprof lock-clocks` for reproducibility");
+    hotpath::interactive::print_warning(
+        "GPU clocks unlocked - run `hotpath lock-clocks` for reproducibility");
   }
 
   if (confirm_start) {
-    const auto confirm = rlprof::interactive::prompt_bool("Start profiling", true);
+    const auto confirm = hotpath::interactive::prompt_bool("Start profiling", true);
     if (!confirm.has_value() || !*confirm) {
       return 0;
     }
   }
 
   std::string output_text;
-  rlprof::interactive::run_with_progress(
+  hotpath::interactive::run_with_progress(
       "Starting vLLM server...",
-      [&](const rlprof::interactive::ProgressCallback& progress) {
+      [&](const hotpath::interactive::ProgressCallback& progress) {
         output_text = run_profile_command(
-            parse_profile_args(rlprof::interactive::build_profile_args(config)),
+            parse_profile_args(hotpath::interactive::build_profile_args(config)),
             progress);
       });
 
   if (persist_defaults) {
-    rlprof::interactive::save_profile_defaults(config);
+    hotpath::interactive::save_profile_defaults(config);
   }
 
   const std::string trimmed_output = trim(output_text);
@@ -2001,7 +2004,7 @@ int execute_profile_config(
     const std::string saved_path =
         newline == std::string::npos ? trimmed_output : trimmed_output.substr(0, newline);
     std::cout << "  Saved: " << saved_path << "\n";
-    std::cout << "  Run `rlprof report " << saved_path << "` to view results\n";
+    std::cout << "  Run `hotpath report " << saved_path << "` to view results\n";
     if (newline != std::string::npos) {
       std::cout << trim(trimmed_output.substr(newline + 1)) << "\n";
     }
@@ -2011,89 +2014,89 @@ int execute_profile_config(
   return 0;
 }
 
-int interactive_profile_flow(const rlprof::interactive::ProfileConfig& initial) {
-  rlprof::interactive::print_header("rlprof · profile your rl environment");
+int interactive_profile_flow(const hotpath::interactive::ProfileConfig& initial) {
+  hotpath::interactive::print_header("hotpath · profile your rl environment");
 
   std::optional<std::string> model;
   while (!model.has_value() || model->empty()) {
-    model = rlprof::interactive::prompt_string("Model", initial.model);
+    model = hotpath::interactive::prompt_string("Model", initial.model);
     if (!model.has_value()) {
       return 0;
     }
     if (model->empty()) {
-      rlprof::interactive::print_warning("Model is required");
+      hotpath::interactive::print_warning("Model is required");
     }
   }
 
-  auto prompts = rlprof::interactive::prompt_int("Prompts per batch", initial.prompts);
+  auto prompts = hotpath::interactive::prompt_int("Prompts per batch", initial.prompts);
   if (!prompts.has_value()) {
     return 0;
   }
-  auto target = rlprof::interactive::prompt_string("Target host", initial.target);
+  auto target = hotpath::interactive::prompt_string("Target host", initial.target);
   if (!target.has_value()) {
     return 0;
   }
   std::string target_workdir = initial.target_workdir;
   if (!target->empty()) {
     auto prompted_workdir =
-        rlprof::interactive::prompt_string("Target workdir", initial.target_workdir);
+        hotpath::interactive::prompt_string("Target workdir", initial.target_workdir);
     if (!prompted_workdir.has_value()) {
       return 0;
     }
     target_workdir = *prompted_workdir;
   }
-  auto rollouts = rlprof::interactive::prompt_int("Rollouts per prompt", initial.rollouts);
+  auto rollouts = hotpath::interactive::prompt_int("Rollouts per prompt", initial.rollouts);
   if (!rollouts.has_value()) {
     return 0;
   }
-  auto min_tokens = rlprof::interactive::prompt_int("Min output tokens", initial.min_tokens);
+  auto min_tokens = hotpath::interactive::prompt_int("Min output tokens", initial.min_tokens);
   if (!min_tokens.has_value()) {
     return 0;
   }
-  auto max_tokens = rlprof::interactive::prompt_int("Max output tokens", initial.max_tokens);
+  auto max_tokens = hotpath::interactive::prompt_int("Max output tokens", initial.max_tokens);
   if (!max_tokens.has_value()) {
     return 0;
   }
   if (*min_tokens > *max_tokens) {
-    rlprof::interactive::print_warning("Min output tokens must be <= max output tokens");
+    hotpath::interactive::print_warning("Min output tokens must be <= max output tokens");
     return 0;
   }
-  auto input_len = rlprof::interactive::prompt_int("Input length", initial.input_len);
+  auto input_len = hotpath::interactive::prompt_int("Input length", initial.input_len);
   if (!input_len.has_value()) {
     return 0;
   }
-  auto port = rlprof::interactive::prompt_int("Server port", initial.port);
+  auto port = hotpath::interactive::prompt_int("Server port", initial.port);
   if (!port.has_value()) {
     return 0;
   }
-  auto tp = rlprof::interactive::prompt_int("Tensor parallel size", initial.tp);
+  auto tp = hotpath::interactive::prompt_int("Tensor parallel size", initial.tp);
   if (!tp.has_value()) {
     return 0;
   }
-  auto peer_servers = rlprof::interactive::prompt_string("Peer servers csv", initial.peer_servers);
+  auto peer_servers = hotpath::interactive::prompt_string("Peer servers csv", initial.peer_servers);
   if (!peer_servers.has_value()) {
     return 0;
   }
   auto trust_remote_code =
-      rlprof::interactive::prompt_bool("Trust remote code", initial.trust_remote_code);
+      hotpath::interactive::prompt_bool("Trust remote code", initial.trust_remote_code);
   if (!trust_remote_code.has_value()) {
     return 0;
   }
   auto discard_first_run =
-      rlprof::interactive::prompt_bool("Discard first run", initial.discard_first_run);
+      hotpath::interactive::prompt_bool("Discard first run", initial.discard_first_run);
   if (!discard_first_run.has_value()) {
     return 0;
   }
-  auto repeat = rlprof::interactive::prompt_int("Repeat runs", initial.repeat);
+  auto repeat = hotpath::interactive::prompt_int("Repeat runs", initial.repeat);
   if (!repeat.has_value()) {
     return 0;
   }
-  auto output = rlprof::interactive::prompt_string("Output path", initial.output);
+  auto output = hotpath::interactive::prompt_string("Output path", initial.output);
   if (!output.has_value()) {
     return 0;
   }
 
-  const rlprof::interactive::ProfileConfig config = {
+  const hotpath::interactive::ProfileConfig config = {
       .model = *model,
       .target = *target,
       .target_workdir = target_workdir,
@@ -2114,29 +2117,29 @@ int interactive_profile_flow(const rlprof::interactive::ProfileConfig& initial) 
 }
 
 int execute_bench_config(
-    const rlprof::interactive::BenchConfig& config,
+    const hotpath::interactive::BenchConfig& config,
     bool persist_defaults) {
   std::cout << "\n  Benchmarking " << config.kernel
-            << " on " << rlprof::interactive::detect_gpu_name() << "...\n";
+            << " on " << hotpath::interactive::detect_gpu_name() << "...\n";
 
   std::string output_text;
-  rlprof::interactive::run_with_progress(
+  hotpath::interactive::run_with_progress(
       "Benchmarking...",
-      [&](const rlprof::interactive::ProgressCallback&) {
+      [&](const hotpath::interactive::ProgressCallback&) {
         output_text = run_bench_command(
-            parse_bench_args(rlprof::interactive::build_bench_args(config)));
+            parse_bench_args(hotpath::interactive::build_bench_args(config)));
       });
 
   if (persist_defaults) {
-    rlprof::interactive::save_bench_defaults(config);
+    hotpath::interactive::save_bench_defaults(config);
   }
 
   std::cout << output_text;
   return 0;
 }
 
-int interactive_bench_flow(const rlprof::interactive::BenchConfig& initial) {
-  rlprof::interactive::print_header("rlprof · benchmark kernel implementations");
+int interactive_bench_flow(const hotpath::interactive::BenchConfig& initial) {
+  hotpath::interactive::print_header("hotpath · benchmark kernel implementations");
   const std::vector<std::string> kernels = {
       "silu_and_mul",
       "fused_add_rms_norm",
@@ -2150,45 +2153,45 @@ int interactive_bench_flow(const rlprof::interactive::BenchConfig& initial) {
     }
   }
   const auto kernel_choice =
-      rlprof::interactive::prompt_choice("Kernel", kernels, default_kernel);
+      hotpath::interactive::prompt_choice("Kernel", kernels, default_kernel);
   if (!kernel_choice.has_value()) {
     return 0;
   }
-  const auto shapes = rlprof::interactive::prompt_string("Shapes", initial.shapes);
+  const auto shapes = hotpath::interactive::prompt_string("Shapes", initial.shapes);
   if (!shapes.has_value()) {
     return 0;
   }
-  const auto target = rlprof::interactive::prompt_string("Target host", initial.target);
+  const auto target = hotpath::interactive::prompt_string("Target host", initial.target);
   if (!target.has_value()) {
     return 0;
   }
   std::string target_workdir = initial.target_workdir;
   if (!target->empty()) {
     const auto prompted_workdir =
-        rlprof::interactive::prompt_string("Target workdir", initial.target_workdir);
+        hotpath::interactive::prompt_string("Target workdir", initial.target_workdir);
     if (!prompted_workdir.has_value()) {
       return 0;
     }
     target_workdir = *prompted_workdir;
   }
-  const auto dtype = rlprof::interactive::prompt_string("Dtype", initial.dtype);
+  const auto dtype = hotpath::interactive::prompt_string("Dtype", initial.dtype);
   if (!dtype.has_value()) {
     return 0;
   }
-  const auto warmup = rlprof::interactive::prompt_int("Warmup iterations", initial.warmup);
+  const auto warmup = hotpath::interactive::prompt_int("Warmup iterations", initial.warmup);
   if (!warmup.has_value()) {
     return 0;
   }
-  const auto n_iter = rlprof::interactive::prompt_int("Timed iterations", initial.n_iter);
+  const auto n_iter = hotpath::interactive::prompt_int("Timed iterations", initial.n_iter);
   if (!n_iter.has_value()) {
     return 0;
   }
-  const auto repeats = rlprof::interactive::prompt_int("Repeat runs", initial.repeats);
+  const auto repeats = hotpath::interactive::prompt_int("Repeat runs", initial.repeats);
   if (!repeats.has_value()) {
     return 0;
   }
 
-  const rlprof::interactive::BenchConfig config = {
+  const hotpath::interactive::BenchConfig config = {
       .kernel = kernels[static_cast<std::size_t>(*kernel_choice)],
       .target = *target,
       .target_workdir = target_workdir,
@@ -2202,7 +2205,7 @@ int interactive_bench_flow(const rlprof::interactive::BenchConfig& initial) {
 }
 
 int interactive_report_flow() {
-  const auto path = choose_recent_profile("rlprof · view a saved profile", true);
+  const auto path = choose_recent_profile("hotpath · view a saved profile", true);
   if (!path.has_value()) {
     return 0;
   }
@@ -2210,10 +2213,10 @@ int interactive_report_flow() {
 }
 
 int interactive_diff_flow() {
-  rlprof::interactive::print_header("rlprof · compare two profiles");
-  const auto profiles = rlprof::interactive::list_recent_profiles(10);
+  hotpath::interactive::print_header("hotpath · compare two profiles");
+  const auto profiles = hotpath::interactive::list_recent_profiles(10);
   if (profiles.size() < 2) {
-    rlprof::interactive::print_warning("Need at least two profiles in .rlprof/");
+    hotpath::interactive::print_warning("Need at least two profiles in .hotpath/");
     return 0;
   }
   std::vector<std::string> options;
@@ -2222,12 +2225,12 @@ int interactive_diff_flow() {
     options.push_back(std::filesystem::path(path).filename().string());
   }
   const auto baseline =
-      rlprof::interactive::prompt_choice("Baseline", options, 0);
+      hotpath::interactive::prompt_choice("Baseline", options, 0);
   if (!baseline.has_value()) {
     return 0;
   }
   const auto candidate =
-      rlprof::interactive::prompt_choice("Candidate", options, std::min<int>(1, options.size() - 1));
+      hotpath::interactive::prompt_choice("Candidate", options, std::min<int>(1, options.size() - 1));
   if (!candidate.has_value()) {
     return 0;
   }
@@ -2236,14 +2239,14 @@ int interactive_diff_flow() {
 }
 
 int interactive_export_flow(const std::string& default_format = "csv") {
-  const auto path = choose_recent_profile("rlprof · export profile data", false);
+  const auto path = choose_recent_profile("hotpath · export profile data", false);
   if (!path.has_value()) {
     return 0;
   }
   const std::vector<std::string> formats = {"csv", "json"};
   const int default_index = default_format == "json" ? 1 : 0;
   const auto format_choice =
-      rlprof::interactive::prompt_choice("Format", formats, default_index);
+      hotpath::interactive::prompt_choice("Format", formats, default_index);
   if (!format_choice.has_value()) {
     return 0;
   }
@@ -2252,7 +2255,7 @@ int interactive_export_flow(const std::string& default_format = "csv") {
 }
 
 int interactive_bench_compare_flow() {
-  rlprof::interactive::print_header("rlprof · compare archived bench runs");
+  hotpath::interactive::print_header("hotpath · compare archived bench runs");
   const auto left = choose_recent_bench_result("Left bench result", true);
   if (!left.has_value()) {
     return 0;
@@ -2266,8 +2269,8 @@ int interactive_bench_compare_flow() {
 
 std::string completion_script(const std::string& shell) {
   if (shell == "bash") {
-    return R"(# bash completion for rlprof
-_rlprof_complete() {
+    return R"(# bash completion for hotpath
+_hotpath_complete() {
   local cur prev
   COMPREPLY=()
   cur="${COMP_WORDS[COMP_CWORD]}"
@@ -2319,12 +2322,12 @@ _rlprof_complete() {
           ;;
   esac
 }
-complete -F _rlprof_complete rlprof
+complete -F _hotpath_complete hotpath
 )";
   }
   if (shell == "zsh") {
-    return R"(#compdef rlprof
-_rlprof() {
+    return R"(#compdef hotpath
+_hotpath() {
   local -a commands
   commands=(
     'profile:run GPU profiling under RL traffic'
@@ -2358,13 +2361,13 @@ _rlprof() {
     args)
       case $words[2] in
         profile)
-          _arguments '--model[model name]' '--server[managed warm server name]' '--attach[existing server url]' '--attach-pid[remote process id; requires nsys PID attach support]' '--target[ssh target host]' '--target-workdir[remote rlprof workdir]' '--prompts[prompt count]' '--rollouts[rollouts per prompt]' '--min-tokens[min output tokens]' '--max-tokens[max output tokens]' '--input-len[input length]' '--port[server port]' '--tp[tensor parallel size]' '--peer-servers[peer endpoints]' '--trust-remote-code[trust remote code]' '--discard-first-run[run and discard a warmup pass]' '--repeat[repeat count]' '--fetch-nsys-rep[copy the remote nsys report locally]' '--output[output path]' '--yes[accept saved defaults]' '--help[show help]'
+          _arguments '--model[model name]' '--server[managed warm server name]' '--attach[existing server url]' '--attach-pid[remote process id; requires nsys PID attach support]' '--target[ssh target host]' '--target-workdir[remote hotpath workdir]' '--prompts[prompt count]' '--rollouts[rollouts per prompt]' '--min-tokens[min output tokens]' '--max-tokens[max output tokens]' '--input-len[input length]' '--port[server port]' '--tp[tensor parallel size]' '--peer-servers[peer endpoints]' '--trust-remote-code[trust remote code]' '--discard-first-run[run and discard a warmup pass]' '--repeat[repeat count]' '--fetch-nsys-rep[copy the remote nsys report locally]' '--output[output path]' '--yes[accept saved defaults]' '--help[show help]'
           ;;
         server)
           _arguments '1:action:(start stop list show prune)' '--name[managed server name]' '--model[model name]' '--port[server port]' '--tp[tensor parallel size]' '--max-model-len[managed server max model length]' '--trust-remote-code[trust remote code]' '--startup-timeout-s[startup timeout seconds]' '--help[show help]'
           ;;
         bench)
-          _arguments '--kernel[kernel name]' '--target[ssh target host]' '--target-workdir[remote rlprof workdir]' '--shapes[shape list]' '--dtype[data type]' '--warmup[warmup iterations]' '--n-iter[timed iterations]' '--repeats[repeat count]' '--batch-ms-target[target milliseconds per timed block]' '--cuda-graph-replay[use CUDA Graph replay]:mode:(off on)' '--output[result output path]' '--yes[accept saved defaults]' '--help[show help]'
+          _arguments '--kernel[kernel name]' '--target[ssh target host]' '--target-workdir[remote hotpath workdir]' '--shapes[shape list]' '--dtype[data type]' '--warmup[warmup iterations]' '--n-iter[timed iterations]' '--repeats[repeat count]' '--batch-ms-target[target milliseconds per timed block]' '--cuda-graph-replay[use CUDA Graph replay]:mode:(off on)' '--output[result output path]' '--yes[accept saved defaults]' '--help[show help]'
           ;;
         aggregate|bench-compare)
           _files
@@ -2373,13 +2376,13 @@ _rlprof() {
           _arguments '--format[export format]:format:(csv json)' '*:path:_files'
           ;;
         doctor)
-          _arguments '--target[ssh target host]' '--target-workdir[remote rlprof workdir]' '--help[show help]'
+          _arguments '--target[ssh target host]' '--target-workdir[remote hotpath workdir]' '--help[show help]'
           ;;
         target)
-          _arguments '1:action:(add list remove show bootstrap)' '--host[ssh target host]' '--workdir[remote rlprof workdir]'
+          _arguments '1:action:(add list remove show bootstrap)' '--host[ssh target host]' '--workdir[remote hotpath workdir]'
           ;;
         recover)
-          _arguments '--target[ssh target host]' '--target-workdir[remote rlprof workdir]' '--remote-db[remote db path]' '--output[local db path]'
+          _arguments '--target[ssh target host]' '--target-workdir[remote hotpath workdir]' '--remote-db[remote db path]' '--output[local db path]'
           ;;
         report|diff|artifacts|trace|validate)
           _files
@@ -2388,81 +2391,81 @@ _rlprof() {
       ;;
   esac
 }
-_rlprof "$@"
+_hotpath "$@"
 )";
   }
   if (shell == "fish") {
-    return R"(complete -c rlprof -f
-complete -c rlprof -n '__fish_use_subcommand' -a 'profile' -d 'run GPU profiling under RL traffic'
-complete -c rlprof -n '__fish_use_subcommand' -a 'report' -d 'view a saved profile'
-complete -c rlprof -n '__fish_use_subcommand' -a 'aggregate' -d 'combine multiple profiles'
-complete -c rlprof -n '__fish_use_subcommand' -a 'bench' -d 'benchmark kernel implementations'
-complete -c rlprof -n '__fish_use_subcommand' -a 'bench-compare' -d 'compare archived bench runs'
-complete -c rlprof -n '__fish_use_subcommand' -a 'diff' -d 'compare two profiles'
-complete -c rlprof -n '__fish_use_subcommand' -a 'export' -d 'export profile data'
-complete -c rlprof -n '__fish_use_subcommand' -a 'trace' -d 'view raw trace artifact paths'
-complete -c rlprof -n '__fish_use_subcommand' -a 'artifacts' -d 'view stored artifact paths'
-complete -c rlprof -n '__fish_use_subcommand' -a 'validate' -d 'validate stored profile against raw artifacts'
-complete -c rlprof -n '__fish_use_subcommand' -a 'traffic' -d 'run traffic generator'
-complete -c rlprof -n '__fish_use_subcommand' -a 'doctor' -d 'check local profiling environment'
-complete -c rlprof -n '__fish_use_subcommand' -a 'server' -d 'manage local warm vllm servers'
-complete -c rlprof -n '__fish_use_subcommand' -a 'target' -d 'manage saved ssh targets'
-complete -c rlprof -n '__fish_use_subcommand' -a 'recover' -d 'recover remote profile artifacts'
-complete -c rlprof -n '__fish_use_subcommand' -a 'lock-clocks' -d 'lock GPU clocks'
-complete -c rlprof -n '__fish_use_subcommand' -a 'unlock-clocks' -d 'unlock GPU clocks'
-complete -c rlprof -n '__fish_use_subcommand' -a 'reset-defaults' -d 'clear saved interactive defaults'
-complete -c rlprof -n '__fish_use_subcommand' -a 'completion' -d 'print shell completion'
-complete -c rlprof -n '__fish_use_subcommand' -a 'help' -d 'show help'
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l model
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l server
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l attach
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l attach-pid
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l target
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l target-workdir
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l prompts
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l rollouts
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l min-tokens
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l max-tokens
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l input-len
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l port
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l tp
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l peer-servers
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l trust-remote-code
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l discard-first-run
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l repeat
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l fetch-nsys-rep
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l output
-complete -c rlprof -n '__fish_seen_subcommand_from profile' -l yes
-complete -c rlprof -n '__fish_seen_subcommand_from bench' -l kernel -a 'silu_and_mul fused_add_rms_norm rotary_embedding'
-complete -c rlprof -n '__fish_seen_subcommand_from bench' -l target
-complete -c rlprof -n '__fish_seen_subcommand_from bench' -l target-workdir
-complete -c rlprof -n '__fish_seen_subcommand_from bench' -l shapes
-complete -c rlprof -n '__fish_seen_subcommand_from bench' -l dtype -a 'bf16 fp16'
-complete -c rlprof -n '__fish_seen_subcommand_from bench' -l warmup
-complete -c rlprof -n '__fish_seen_subcommand_from bench' -l n-iter
-complete -c rlprof -n '__fish_seen_subcommand_from bench' -l repeats
-complete -c rlprof -n '__fish_seen_subcommand_from bench' -l batch-ms-target
-complete -c rlprof -n '__fish_seen_subcommand_from bench' -l cuda-graph-replay -a 'off on'
-complete -c rlprof -n '__fish_seen_subcommand_from bench' -l output
-complete -c rlprof -n '__fish_seen_subcommand_from bench' -l yes
-complete -c rlprof -n '__fish_seen_subcommand_from export' -l format -a 'csv json'
-complete -c rlprof -n '__fish_seen_subcommand_from doctor' -l target
-complete -c rlprof -n '__fish_seen_subcommand_from doctor' -l target-workdir
-complete -c rlprof -n '__fish_seen_subcommand_from server' -a 'start stop list show prune'
-complete -c rlprof -n '__fish_seen_subcommand_from server' -l name
-complete -c rlprof -n '__fish_seen_subcommand_from server' -l model
-complete -c rlprof -n '__fish_seen_subcommand_from server' -l port
-complete -c rlprof -n '__fish_seen_subcommand_from server' -l tp
-complete -c rlprof -n '__fish_seen_subcommand_from server' -l max-model-len
-complete -c rlprof -n '__fish_seen_subcommand_from server' -l trust-remote-code
-complete -c rlprof -n '__fish_seen_subcommand_from server' -l startup-timeout-s
-complete -c rlprof -n '__fish_seen_subcommand_from target' -a 'add list remove show bootstrap'
-complete -c rlprof -n '__fish_seen_subcommand_from target' -l host
-complete -c rlprof -n '__fish_seen_subcommand_from target' -l workdir
-complete -c rlprof -n '__fish_seen_subcommand_from recover' -l target
-complete -c rlprof -n '__fish_seen_subcommand_from recover' -l target-workdir
-complete -c rlprof -n '__fish_seen_subcommand_from recover' -l remote-db
-complete -c rlprof -n '__fish_seen_subcommand_from recover' -l output
+    return R"(complete -c hotpath -f
+complete -c hotpath -n '__fish_use_subcommand' -a 'profile' -d 'run GPU profiling under RL traffic'
+complete -c hotpath -n '__fish_use_subcommand' -a 'report' -d 'view a saved profile'
+complete -c hotpath -n '__fish_use_subcommand' -a 'aggregate' -d 'combine multiple profiles'
+complete -c hotpath -n '__fish_use_subcommand' -a 'bench' -d 'benchmark kernel implementations'
+complete -c hotpath -n '__fish_use_subcommand' -a 'bench-compare' -d 'compare archived bench runs'
+complete -c hotpath -n '__fish_use_subcommand' -a 'diff' -d 'compare two profiles'
+complete -c hotpath -n '__fish_use_subcommand' -a 'export' -d 'export profile data'
+complete -c hotpath -n '__fish_use_subcommand' -a 'trace' -d 'view raw trace artifact paths'
+complete -c hotpath -n '__fish_use_subcommand' -a 'artifacts' -d 'view stored artifact paths'
+complete -c hotpath -n '__fish_use_subcommand' -a 'validate' -d 'validate stored profile against raw artifacts'
+complete -c hotpath -n '__fish_use_subcommand' -a 'traffic' -d 'run traffic generator'
+complete -c hotpath -n '__fish_use_subcommand' -a 'doctor' -d 'check local profiling environment'
+complete -c hotpath -n '__fish_use_subcommand' -a 'server' -d 'manage local warm vllm servers'
+complete -c hotpath -n '__fish_use_subcommand' -a 'target' -d 'manage saved ssh targets'
+complete -c hotpath -n '__fish_use_subcommand' -a 'recover' -d 'recover remote profile artifacts'
+complete -c hotpath -n '__fish_use_subcommand' -a 'lock-clocks' -d 'lock GPU clocks'
+complete -c hotpath -n '__fish_use_subcommand' -a 'unlock-clocks' -d 'unlock GPU clocks'
+complete -c hotpath -n '__fish_use_subcommand' -a 'reset-defaults' -d 'clear saved interactive defaults'
+complete -c hotpath -n '__fish_use_subcommand' -a 'completion' -d 'print shell completion'
+complete -c hotpath -n '__fish_use_subcommand' -a 'help' -d 'show help'
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l model
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l server
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l attach
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l attach-pid
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l target
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l target-workdir
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l prompts
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l rollouts
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l min-tokens
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l max-tokens
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l input-len
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l port
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l tp
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l peer-servers
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l trust-remote-code
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l discard-first-run
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l repeat
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l fetch-nsys-rep
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l output
+complete -c hotpath -n '__fish_seen_subcommand_from profile' -l yes
+complete -c hotpath -n '__fish_seen_subcommand_from bench' -l kernel -a 'silu_and_mul fused_add_rms_norm rotary_embedding'
+complete -c hotpath -n '__fish_seen_subcommand_from bench' -l target
+complete -c hotpath -n '__fish_seen_subcommand_from bench' -l target-workdir
+complete -c hotpath -n '__fish_seen_subcommand_from bench' -l shapes
+complete -c hotpath -n '__fish_seen_subcommand_from bench' -l dtype -a 'bf16 fp16'
+complete -c hotpath -n '__fish_seen_subcommand_from bench' -l warmup
+complete -c hotpath -n '__fish_seen_subcommand_from bench' -l n-iter
+complete -c hotpath -n '__fish_seen_subcommand_from bench' -l repeats
+complete -c hotpath -n '__fish_seen_subcommand_from bench' -l batch-ms-target
+complete -c hotpath -n '__fish_seen_subcommand_from bench' -l cuda-graph-replay -a 'off on'
+complete -c hotpath -n '__fish_seen_subcommand_from bench' -l output
+complete -c hotpath -n '__fish_seen_subcommand_from bench' -l yes
+complete -c hotpath -n '__fish_seen_subcommand_from export' -l format -a 'csv json'
+complete -c hotpath -n '__fish_seen_subcommand_from doctor' -l target
+complete -c hotpath -n '__fish_seen_subcommand_from doctor' -l target-workdir
+complete -c hotpath -n '__fish_seen_subcommand_from server' -a 'start stop list show prune'
+complete -c hotpath -n '__fish_seen_subcommand_from server' -l name
+complete -c hotpath -n '__fish_seen_subcommand_from server' -l model
+complete -c hotpath -n '__fish_seen_subcommand_from server' -l port
+complete -c hotpath -n '__fish_seen_subcommand_from server' -l tp
+complete -c hotpath -n '__fish_seen_subcommand_from server' -l max-model-len
+complete -c hotpath -n '__fish_seen_subcommand_from server' -l trust-remote-code
+complete -c hotpath -n '__fish_seen_subcommand_from server' -l startup-timeout-s
+complete -c hotpath -n '__fish_seen_subcommand_from target' -a 'add list remove show bootstrap'
+complete -c hotpath -n '__fish_seen_subcommand_from target' -l host
+complete -c hotpath -n '__fish_seen_subcommand_from target' -l workdir
+complete -c hotpath -n '__fish_seen_subcommand_from recover' -l target
+complete -c hotpath -n '__fish_seen_subcommand_from recover' -l target-workdir
+complete -c hotpath -n '__fish_seen_subcommand_from recover' -l remote-db
+complete -c hotpath -n '__fish_seen_subcommand_from recover' -l output
 )";
   }
   throw std::runtime_error("unsupported shell: " + shell);
@@ -2474,11 +2477,11 @@ int handle_completion(const Args& args) {
     shell = args[1];
   }
   if (args.size() >= 2 && args[1] == "--help") {
-    std::cout << "Usage: rlprof completion [bash|zsh|fish]\n"
+    std::cout << "Usage: hotpath completion [bash|zsh|fish]\n"
               << "Examples:\n"
-              << "  rlprof completion bash > ~/.local/share/bash-completion/completions/rlprof\n"
-              << "  rlprof completion zsh > ~/.zfunc/_rlprof\n"
-              << "  rlprof completion fish > ~/.config/fish/completions/rlprof.fish\n";
+              << "  hotpath completion bash > ~/.local/share/bash-completion/completions/hotpath\n"
+              << "  hotpath completion zsh > ~/.zfunc/_hotpath\n"
+              << "  hotpath completion fish > ~/.config/fish/completions/hotpath.fish\n";
     return 0;
   }
   std::cout << completion_script(shell);
@@ -2486,7 +2489,7 @@ int handle_completion(const Args& args) {
 }
 
 void print_help() {
-  std::cout << "Usage: rlprof <command> [options]\n\n"
+  std::cout << "Usage: hotpath <command> [options]\n\n"
             << "Commands:\n"
             << "  version\n"
             << "  profile (--model MODEL | --server NAME | --attach URL) [options] [--repeat N]\n"
@@ -2517,13 +2520,73 @@ void print_help() {
             << "  completion [bash|zsh|fish]\n";
 }
 
+int handle_serve_profile(const Args& args) {
+  hotpath::ServeProfileOptions opts;
+  for (std::size_t i = 1; i < args.size(); ++i) {
+    if (args[i] == "--endpoint") { opts.endpoint = require_value(args, i, "--endpoint"); }
+    else if (args[i] == "--duration") { opts.duration_seconds = std::stoi(require_value(args, i, "--duration")); }
+    else if (args[i] == "--traffic") { opts.traffic_path = require_value(args, i, "--traffic"); }
+    else if (args[i] == "--output") { opts.output = require_value(args, i, "--output"); }
+    else if (args[i] == "--nsys") { opts.use_nsys = true; }
+    else if (args[i] == "--engine") { opts.engine = require_value(args, i, "--engine"); }
+    else if (args[i] == "--help") {
+      std::cout << "Usage: hotpath serve-profile [options]\n"
+                << "  --endpoint URL     vLLM/SGLang endpoint (default: http://localhost:8000)\n"
+                << "  --duration N       profiling duration in seconds (default: 60)\n"
+                << "  --traffic PATH     JSONL or ShareGPT traffic file\n"
+                << "  --output PATH      output directory (default: .hotpath/serve_run)\n"
+                << "  --nsys             also capture kernel trace via nsys\n"
+                << "  --engine TYPE      vllm or sglang (default: vllm)\n";
+      return 0;
+    }
+  }
+  return hotpath::run_serve_profile(opts);
+}
+
+int handle_serve_report(const Args& args) {
+  std::string db_path;
+  for (std::size_t i = 1; i < args.size(); ++i) {
+    if (!args[i].starts_with("--")) {
+      db_path = args[i];
+      break;
+    }
+  }
+  if (db_path.empty()) {
+    std::cerr << "Usage: hotpath serve-report <serve_profile.db>\n";
+    return 1;
+  }
+  // Will be implemented in Task 12
+  std::cerr << "serve-report: " << db_path << "\n";
+  return 0;
+}
+
+int handle_disagg_config(const Args& args) {
+  std::string db_path;
+  std::string format = "all";
+  for (std::size_t i = 1; i < args.size(); ++i) {
+    if (args[i] == "--format") { format = require_value(args, i, "--format"); }
+    else if (args[i] == "--help") {
+      std::cout << "Usage: hotpath disagg-config <serve_profile.db> [--format vllm|llmd|dynamo|all]\n";
+      return 0;
+    }
+    else if (!args[i].starts_with("--")) { db_path = args[i]; }
+  }
+  if (db_path.empty()) {
+    std::cerr << "Usage: hotpath disagg-config <serve_profile.db> [--format vllm|llmd|dynamo|all]\n";
+    return 1;
+  }
+  // Will load DisaggEstimate from DB and generate configs
+  std::cerr << "disagg-config: " << db_path << " format=" << format << "\n";
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
   if (argc < 2) {
-      rlprof::interactive::print_header("rlprof · profile your rl environment");
-      const auto choice = rlprof::interactive::prompt_choice(
+      hotpath::interactive::print_header("hotpath · profile your rl environment");
+      const auto choice = hotpath::interactive::prompt_choice(
           "What would you like to do?",
           {
               "Profile - run GPU profiling under RL traffic",
@@ -2548,17 +2611,17 @@ int main(int argc, char** argv) {
         return 0;
       }
       if (*choice == 0) {
-        return interactive_profile_flow(rlprof::interactive::load_profile_defaults());
+        return interactive_profile_flow(hotpath::interactive::load_profile_defaults());
       }
       if (*choice == 1) {
         return interactive_report_flow();
       }
       if (*choice == 2) {
-        std::cout << "Usage: rlprof aggregate <a.db> <b.db> [more.db ...] --output out.db\n";
+        std::cout << "Usage: hotpath aggregate <a.db> <b.db> [more.db ...] --output out.db\n";
         return 0;
       }
       if (*choice == 3) {
-        return interactive_bench_flow(rlprof::interactive::load_bench_defaults());
+        return interactive_bench_flow(hotpath::interactive::load_bench_defaults());
       }
       if (*choice == 4) {
         return interactive_diff_flow();
@@ -2746,13 +2809,25 @@ int main(int argc, char** argv) {
       return handle_bench_compare(args);
     }
 
+    if (command == "serve-profile") {
+      return handle_serve_profile(args);
+    }
+
+    if (command == "serve-report") {
+      return handle_serve_report(args);
+    }
+
+    if (command == "disagg-config") {
+      return handle_disagg_config(args);
+    }
+
     if (command == "--help" || command == "help") {
       print_help();
       return 0;
     }
 
     if (command == "version") {
-      std::cout << "rlprof 0.1.1\n";
+      std::cout << "hotpath 0.1.1\n";
       return 0;
     }
 

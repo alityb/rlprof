@@ -5,8 +5,8 @@
 #include <string>
 #include <vector>
 
-#include "rlprof/export.h"
-#include "rlprof/store.h"
+#include "hotpath/export.h"
+#include "hotpath/store.h"
 
 namespace {
 
@@ -27,11 +27,11 @@ std::string read_text(const std::filesystem::path& path) {
 }  // namespace
 
 int main() {
-  const auto temp_dir = std::filesystem::temp_directory_path() / "rlprof_test_export";
+  const auto temp_dir = std::filesystem::temp_directory_path() / "hotpath_test_export";
   std::filesystem::create_directories(temp_dir);
   const auto db_path = temp_dir / "profile.db";
 
-  rlprof::ProfileData profile{
+  hotpath::ProfileData profile{
       .meta = {
           {"model_name", "Qwen/Qwen3-8B"},
           {"gpu_name", "NVIDIA A10G, 24GB"},
@@ -69,11 +69,11 @@ int main() {
       },
   };
 
-  rlprof::save_profile(db_path, profile);
+  hotpath::save_profile(db_path, profile);
 
-  const auto csv_outputs = rlprof::export_profile(db_path, "csv");
+  const auto csv_outputs = hotpath::export_profile(db_path, "csv");
   expect_true(csv_outputs.size() == 6, "csv export should write all profile tables and warnings");
-  const auto json_outputs = rlprof::export_profile(db_path, "json");
+  const auto json_outputs = hotpath::export_profile(db_path, "json");
   expect_true(json_outputs.size() == 1, "json export should write one file");
 
   const std::string kernels_csv = read_text(temp_dir / "profile_kernels.csv");

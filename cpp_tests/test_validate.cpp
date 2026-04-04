@@ -8,10 +8,10 @@
 
 #include <sqlite3.h>
 
-#include "rlprof/export.h"
-#include "rlprof/profiler/vllm_metrics.h"
-#include "rlprof/store.h"
-#include "rlprof/validate.h"
+#include "hotpath/export.h"
+#include "hotpath/profiler/vllm_metrics.h"
+#include "hotpath/store.h"
+#include "hotpath/validate.h"
 
 namespace {
 
@@ -22,8 +22,8 @@ void expect_true(bool condition, const std::string& message) {
   }
 }
 
-rlprof::ValidationStatus status_for(
-    const std::vector<rlprof::ValidationCheck>& checks,
+hotpath::ValidationStatus status_for(
+    const std::vector<hotpath::ValidationCheck>& checks,
     const std::string& name) {
   for (const auto& check : checks) {
     if (check.name == name) {
@@ -38,7 +38,7 @@ rlprof::ValidationStatus status_for(
 
 int main() {
   namespace fs = std::filesystem;
-  const fs::path temp_root = fs::temp_directory_path() / "rlprof_test_validate";
+  const fs::path temp_root = fs::temp_directory_path() / "hotpath_test_validate";
   fs::remove_all(temp_root);
   fs::create_directories(temp_root);
 
@@ -48,7 +48,7 @@ int main() {
   const fs::path xml_path = temp_root / "sample_nvidia_smi.xml";
   const fs::path server_log_path = temp_root / "sample_server.log";
 
-  rlprof::ProfileData profile = {
+  hotpath::ProfileData profile = {
       .meta = {
           {"model_name", "Qwen/Qwen3-8B"},
           {"gpu_name", "NVIDIA A10G"},
@@ -102,7 +102,7 @@ int main() {
       },
   };
 
-  rlprof::save_profile(db_path, profile);
+  hotpath::save_profile(db_path, profile);
   std::ofstream(rep_path).put('\n');
   std::ofstream(xml_path).put('\n');
   std::ofstream(server_log_path).put('\n');
@@ -129,22 +129,22 @@ int main() {
       "failed to insert kernel rows");
   sqlite3_close(sqlite);
 
-  for (const auto& exported : rlprof::export_profile(db_path, "csv")) {
+  for (const auto& exported : hotpath::export_profile(db_path, "csv")) {
     expect_true(fs::exists(exported), "expected exported csv artifact");
   }
-  for (const auto& exported : rlprof::export_profile(db_path, "json")) {
+  for (const auto& exported : hotpath::export_profile(db_path, "json")) {
     expect_true(fs::exists(exported), "expected exported json artifact");
   }
 
-  const auto checks = rlprof::validate_profile(db_path);
+  const auto checks = hotpath::validate_profile(db_path);
   expect_true(
-      status_for(checks, "artifacts") == rlprof::ValidationStatus::kPass,
+      status_for(checks, "artifacts") == hotpath::ValidationStatus::kPass,
       "expected artifacts validation pass");
   expect_true(
-      status_for(checks, "kernel totals") == rlprof::ValidationStatus::kPass,
+      status_for(checks, "kernel totals") == hotpath::ValidationStatus::kPass,
       "expected kernel totals validation pass");
   expect_true(
-      status_for(checks, "metrics summary") == rlprof::ValidationStatus::kPass,
+      status_for(checks, "metrics summary") == hotpath::ValidationStatus::kPass,
       "expected metrics summary validation pass");
 
   profile.metrics.push_back(
@@ -152,27 +152,27 @@ int main() {
        .source = "peer1",
        .metric = "vllm:num_preemptions_total",
        .value = 100.0});
-  profile.metrics_summary = rlprof::profiler::summarize_samples(profile.metrics);
-  rlprof::save_profile(db_path, profile);
-  const auto mixed_source_checks = rlprof::validate_profile(db_path);
+  profile.metrics_summary = hotpath::profiler::summarize_samples(profile.metrics);
+  hotpath::save_profile(db_path, profile);
+  const auto mixed_source_checks = hotpath::validate_profile(db_path);
   expect_true(
-      status_for(mixed_source_checks, "metrics summary") == rlprof::ValidationStatus::kPass,
+      status_for(mixed_source_checks, "metrics summary") == hotpath::ValidationStatus::kPass,
       "expected mixed-source metrics summary validation pass");
 
   const auto rendered =
-      rlprof::render_validation_report(db_path, checks, false);
+      hotpath::render_validation_report(db_path, checks, false);
   expect_true(rendered.find("VALIDATE") != std::string::npos, "expected validate header");
   expect_true(rendered.find("kernel totals") != std::string::npos, "expected kernel totals row");
 
   profile.meta["artifact_nsys_rep_path"] = "";
   profile.meta["remote_artifact_nsys_rep_path"] = "/remote/sample.nsys-rep";
   profile.meta["warning_remote_nsys_report_not_fetched"] = "true";
-  rlprof::save_profile(db_path, profile);
+  hotpath::save_profile(db_path, profile);
   fs::remove(rep_path);
 
-  const auto remote_checks = rlprof::validate_profile(db_path);
+  const auto remote_checks = hotpath::validate_profile(db_path);
   expect_true(
-      status_for(remote_checks, "artifacts") == rlprof::ValidationStatus::kWarn,
+      status_for(remote_checks, "artifacts") == hotpath::ValidationStatus::kWarn,
       "expected remote no-report fetch artifacts validation warn");
 
   fs::remove_all(temp_root);

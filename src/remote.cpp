@@ -1,9 +1,9 @@
-#include "rlprof/remote.h"
+#include "hotpath/remote.h"
 
 #include <sstream>
 #include <string>
 
-namespace rlprof {
+namespace hotpath {
 namespace {
 
 std::string shell_escape(const std::string& value) {
@@ -56,7 +56,7 @@ bool has_remote_target(const RemoteTarget& target) {
 
 std::string remote_join(const RemoteTarget& target, const std::filesystem::path& local_path) {
   const std::string leaf = local_path.filename().string();
-  return target.workdir + "/.rlprof/" + leaf;
+  return target.workdir + "/.hotpath/" + leaf;
 }
 
 std::string remote_shell_command(
@@ -71,7 +71,7 @@ std::string remote_cli_command(
     const std::vector<std::string>& args) {
   return remote_shell_command(
       target,
-      "cd " + shell_escape(target.workdir) + " && ./build/rlprof " + join_args(args));
+      "cd " + shell_escape(target.workdir) + " && ./build/hotpath " + join_args(args));
 }
 
 std::string remote_file_exists_command(
@@ -112,4 +112,4 @@ std::string remote_epoch_ms_command(const RemoteTarget& target) {
   return "ssh " + shell_escape(target.host) + " " + shell_escape(remote_command);
 }
 
-}  // namespace rlprof
+}  // namespace hotpath

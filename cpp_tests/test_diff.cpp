@@ -2,8 +2,8 @@
 #include <filesystem>
 #include <iostream>
 
-#include "rlprof/diff.h"
-#include "rlprof/store.h"
+#include "hotpath/diff.h"
+#include "hotpath/store.h"
 
 namespace {
 
@@ -18,16 +18,16 @@ void expect_true(bool condition, const std::string& message) {
 
 int main() {
   namespace fs = std::filesystem;
-  const fs::path temp_dir = fs::temp_directory_path() / "rlprof_cpp_tests";
+  const fs::path temp_dir = fs::temp_directory_path() / "hotpath_cpp_tests";
   fs::create_directories(temp_dir);
   const fs::path path_a = temp_dir / "a.db";
   const fs::path path_b = temp_dir / "b.db";
   fs::remove(path_a);
   fs::remove(path_b);
 
-  rlprof::save_profile(
+  hotpath::save_profile(
       path_a,
-      rlprof::ProfileData{
+      hotpath::ProfileData{
           .meta = {{"model_name", "A"}},
           .kernels = {{
               .name = "gemm_a",
@@ -45,9 +45,9 @@ int main() {
           .traffic_stats = {.total_requests = 0, .completion_length_mean = std::nullopt, .completion_length_p50 = std::nullopt, .completion_length_p99 = std::nullopt, .max_median_ratio = std::nullopt, .errors = 0},
       });
 
-  rlprof::save_profile(
+  hotpath::save_profile(
       path_b,
-      rlprof::ProfileData{
+      hotpath::ProfileData{
           .meta = {{"model_name", "B"}},
           .kernels = {
               {
@@ -78,7 +78,7 @@ int main() {
           .traffic_stats = {.total_requests = 0, .completion_length_mean = std::nullopt, .completion_length_p50 = std::nullopt, .completion_length_p99 = std::nullopt, .max_median_ratio = std::nullopt, .errors = 0},
       });
 
-  const auto deltas = rlprof::diff_profiles(path_a, path_b);
+  const auto deltas = hotpath::diff_profiles(path_a, path_b);
   expect_true(deltas.size() == 2, "expected two category deltas");
   expect_true(deltas[0].category == "attention", "unexpected first category");
   expect_true(deltas[0].a_ms == 0.0, "unexpected first a_ms");

@@ -52,27 +52,27 @@ std::string shell_escape(const std::string& value) {
 int main(int argc, char** argv) {
   namespace fs = std::filesystem;
   const fs::path exe_dir = fs::absolute(argv[0]).parent_path();
-  const fs::path rlprof = exe_dir / "rlprof";
-  const fs::path temp_root = fs::temp_directory_path() / "rlprof_test_cli";
+  const fs::path hotpath = exe_dir / "hotpath";
+  const fs::path temp_root = fs::temp_directory_path() / "hotpath_test_cli";
   fs::remove_all(temp_root);
   fs::create_directories(temp_root);
 
   const std::string export_command =
       "cd " + shell_escape(temp_root.string()) + " && " +
-      shell_escape(rlprof.string()) + " export --format json";
+      shell_escape(hotpath.string()) + " export --format json";
   const auto export_result = run_command(export_command);
   expect_true(export_result.rc == 0, "expected export with no profiles to exit cleanly");
   expect_true(
-      export_result.output.find("No profiles found in .rlprof/") != std::string::npos,
+      export_result.output.find("No profiles found in .hotpath/") != std::string::npos,
       "expected clean no-profile export message");
 
   const std::string validate_command =
       "cd " + shell_escape(temp_root.string()) + " && " +
-      shell_escape(rlprof.string()) + " validate";
+      shell_escape(hotpath.string()) + " validate";
   const auto validate_result = run_command(validate_command);
   expect_true(validate_result.rc != 0, "expected validate with no profiles to fail cleanly");
   expect_true(
-      validate_result.output.find("No profile database found in .rlprof/") != std::string::npos,
+      validate_result.output.find("No profile database found in .hotpath/") != std::string::npos,
       "expected clean no-profile validate message");
 
   fs::remove_all(temp_root);

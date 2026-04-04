@@ -1,4 +1,4 @@
-#include "rlprof/clock_control.h"
+#include "hotpath/clock_control.h"
 
 #include <array>
 #include <cctype>
@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace rlprof {
+namespace hotpath {
 namespace {
 
 std::string trim(std::string value) {
@@ -176,7 +176,7 @@ std::string render_clock_policy(const ClockPolicyInfo& info) {
 }
 
 std::string gpu_clocks_unlocked_warning() {
-  return "GPU clocks are not locked. Run `rlprof lock-clocks` for reproducible "
+  return "GPU clocks are not locked. Run `hotpath lock-clocks` for reproducible "
          "measurements. See: docs.nvidia.com/deploy/nvidia-smi/index.html";
 }
 
@@ -196,4 +196,4 @@ void unlock_gpu_clocks() {
   }
 }
 
-}  // namespace rlprof
+}  // namespace hotpath

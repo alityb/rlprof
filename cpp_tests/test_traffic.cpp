@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "rlprof/traffic.h"
+#include "hotpath/traffic.h"
 
 namespace {
 
@@ -31,17 +31,17 @@ void expect_throws(const std::function<void()>& fn, const std::string& message) 
 
 int main() {
   expect_throws(
-      []() { static_cast<void>(rlprof::generate_requests(1, 1, 32, 9, 3)); },
+      []() { static_cast<void>(hotpath::generate_requests(1, 1, 32, 9, 3)); },
       "expected invalid token bounds to throw");
   expect_throws(
-      []() { static_cast<void>(rlprof::generate_requests(1, 1, 0, 1, 3)); },
+      []() { static_cast<void>(hotpath::generate_requests(1, 1, 0, 1, 3)); },
       "expected invalid input length to throw");
 
-  const std::vector<rlprof::TrafficRequest> requests = {{
+  const std::vector<hotpath::TrafficRequest> requests = {{
       .prompt = "p",
       .output_len = 7,
   }};
-  const std::vector<rlprof::TrafficResult> results = {{
+  const std::vector<hotpath::TrafficResult> results = {{
       .ok = true,
       .http_status = 200,
       .completion_tokens = std::nullopt,
@@ -49,7 +49,7 @@ int main() {
       .error = "",
   }};
 
-  const auto stats = rlprof::summarize_traffic(results, requests);
+  const auto stats = hotpath::summarize_traffic(results, requests);
   expect_true(stats.total_requests == 1, "expected total requests");
   expect_true(!stats.completion_length_mean.has_value(), "missing usage should not invent a mean");
   expect_true(!stats.completion_length_p50.has_value(), "missing usage should not invent p50");

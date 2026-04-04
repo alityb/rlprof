@@ -1,4 +1,4 @@
-#include "rlprof/diff.h"
+#include "hotpath/diff.h"
 
 #include <algorithm>
 #include <cmath>
@@ -12,9 +12,9 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-#include "rlprof/store.h"
+#include "hotpath/store.h"
 
-namespace rlprof {
+namespace hotpath {
 namespace {
 
 std::map<std::string, std::int64_t> category_totals(
@@ -211,4 +211,4 @@ std::string render_diff(
   return out.str();
 }
 
-}  // namespace rlprof
+}  // namespace hotpath

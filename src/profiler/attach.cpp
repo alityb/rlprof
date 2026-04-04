@@ -1,4 +1,4 @@
-#include "rlprof/profiler/attach.h"
+#include "hotpath/profiler/attach.h"
 
 #include <algorithm>
 #include <array>
@@ -17,7 +17,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace rlprof::profiler {
+namespace hotpath::profiler {
 namespace {
 
 std::string shell_escape(const std::string& value) {
@@ -383,4 +383,4 @@ std::optional<AttachClonePlan> build_attach_clone_plan(
   };
 }
 
-}  // namespace rlprof::profiler
+}  // namespace hotpath::profiler

@@ -26,16 +26,16 @@ jobs:
 
       - name: CLI smoke
         run: |
-          ./build/rlprof help
-          ./build/rlprof version
-          ./build/rlprof doctor
-          ./build/rlprof target --help
-          ./build/rlprof export --help
-          ./build/rlprof artifacts --help
-          ./build/rlprof trace --help
-          ./build/rlprof validate --help
-          ./build/rlprof manifest --help
-          ./build/rlprof cleanup --help
-          ./build/rlprof cluster-profile --help
-          ./build/rlprof soak-profile --help
-          ./build/rlprof completion bash >/tmp/rlprof.bash
+          ./build/hotpath help
+          ./build/hotpath version
+          ./build/hotpath doctor
+          ./build/hotpath target --help
+          ./build/hotpath export --help
+          ./build/hotpath artifacts --help
+          ./build/hotpath trace --help
+          ./build/hotpath validate --help
+          ./build/hotpath manifest --help
+          ./build/hotpath cleanup --help
+          ./build/hotpath cluster-profile --help
+          ./build/hotpath soak-profile --help
+          ./build/hotpath completion bash >/tmp/hotpath.bash

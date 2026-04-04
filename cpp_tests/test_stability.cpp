@@ -6,8 +6,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include "rlprof/stability.h"
-#include "rlprof/store.h"
+#include "hotpath/stability.h"
+#include "hotpath/store.h"
 
 namespace {
 
@@ -18,8 +18,8 @@ void expect_true(bool condition, const std::string& message) {
   }
 }
 
-const rlprof::StabilityRow& find_row(
-    const std::vector<rlprof::StabilityRow>& rows,
+const hotpath::StabilityRow& find_row(
+    const std::vector<hotpath::StabilityRow>& rows,
     const std::string& label) {
   for (const auto& row : rows) {
     if (row.label == label) {
@@ -33,10 +33,10 @@ const rlprof::StabilityRow& find_row(
 
 int main() {
   namespace fs = std::filesystem;
-  const fs::path temp_dir = fs::temp_directory_path() / "rlprof_test_stability";
+  const fs::path temp_dir = fs::temp_directory_path() / "hotpath_test_stability";
   fs::create_directories(temp_dir);
 
-  const std::vector<rlprof::ProfileData> profiles_to_save = {
+  const std::vector<hotpath::ProfileData> profiles_to_save = {
       {
           .meta = {{"model_name", "mock-model"}},
           .kernels = {
@@ -81,14 +81,14 @@ int main() {
       },
   };
 
-  std::vector<rlprof::ProfileData> profiles;
+  std::vector<hotpath::ProfileData> profiles;
   for (std::size_t i = 0; i < profiles_to_save.size(); ++i) {
     const fs::path db_path = temp_dir / ("stability_r" + std::to_string(i + 1) + ".db");
-    rlprof::save_profile(db_path, profiles_to_save[i]);
-    profiles.push_back(rlprof::load_profile(db_path));
+    hotpath::save_profile(db_path, profiles_to_save[i]);
+    profiles.push_back(hotpath::load_profile(db_path));
   }
 
-  const rlprof::StabilityReport report = rlprof::compute_stability_report(profiles);
+  const hotpath::StabilityReport report = hotpath::compute_stability_report(profiles);
   expect_true(report.run_count == 3, "expected 3 runs in stability report");
 
   expect_true(std::abs(report.total_kernel_time.mean - 155.0) < 1e-9, "unexpected total mean");
@@ -128,7 +128,7 @@ int main() {
   expect_true(std::abs(*kv_cache.max_min_ratio - (0.92 / 0.90)) < 1e-9, "unexpected kv cache ratio");
   expect_true(kv_cache.pass, "kv cache should pass");
 
-  const std::string rendered = rlprof::render_stability_report(report);
+  const std::string rendered = hotpath::render_stability_report(report);
   expect_true(rendered.find("STABILITY REPORT (3 runs)") != std::string::npos, "missing stability heading");
   expect_true(rendered.find("total kernel time") != std::string::npos, "missing total row");
   expect_true(rendered.find("attention") != std::string::npos, "missing attention row");

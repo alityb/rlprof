@@ -3,7 +3,7 @@
 #include <iostream>
 #include <string>
 
-#include "rlprof/bench/runner.h"
+#include "hotpath/bench/runner.h"
 
 namespace {
 
@@ -60,7 +60,7 @@ int main() {
 }
 )JSON";
 
-  const auto output = rlprof::bench::parse_bench_json(json);
+  const auto output = hotpath::bench::parse_bench_json(json);
   expect_true(output.gpu.has_value(), "gpu section should parse");
   expect_true(output.results.size() == 1, "one bench result should parse");
   expect_true(output.results[0].implementation == "vllm-cuda", "implementation mismatch");
@@ -71,22 +71,22 @@ int main() {
   expect_true(output.timing_warnings.size() == 1, "timing warnings should parse");
   expect_true(output.environment_warnings.size() == 1, "environment warnings should parse");
 
-  const std::string rendered = rlprof::bench::render_bench_output(output);
+  const std::string rendered = hotpath::bench::render_bench_output(output);
   expect_true(rendered.find("avg us") != std::string::npos, "render should use microsecond headings");
   expect_true(rendered.find("vllm-cuda") != std::string::npos, "render should contain implementation");
   expect_true(rendered.find("TIMING WARNINGS") != std::string::npos, "render should include timing warnings");
   expect_true(rendered.find("ENVIRONMENT WARNINGS") != std::string::npos, "render should include environment warnings");
 
-  const std::string roundtrip = rlprof::bench::serialize_bench_output_json(output);
+  const std::string roundtrip = hotpath::bench::serialize_bench_output_json(output);
   expect_true(roundtrip.find("\"timing_warnings\"") != std::string::npos,
               "serialized output should include timing warnings");
   expect_true(roundtrip.find("\"environment_warnings\"") != std::string::npos,
               "serialized output should include environment warnings");
 
-  rlprof::bench::BenchRunOutput left_only = output;
-  rlprof::bench::BenchRunOutput right_only = output;
+  hotpath::bench::BenchRunOutput left_only = output;
+  hotpath::bench::BenchRunOutput right_only = output;
   right_only.results.clear();
-  const std::string comparison = rlprof::bench::render_bench_comparison(left_only, right_only);
+  const std::string comparison = hotpath::bench::render_bench_comparison(left_only, right_only);
   expect_true(
       comparison.find("missing") != std::string::npos,
       "bench comparison should mark missing rows instead of using fake zeros");

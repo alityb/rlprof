@@ -9,7 +9,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "rlprof/profiler/vllm_metrics.h"
+#include "hotpath/profiler/vllm_metrics.h"
 
 namespace {
 
@@ -33,7 +33,7 @@ vllm:num_requests_running{model_name="Qwen"} 84
 ignored_metric 123
 )TXT";
 
-  const auto parsed = rlprof::profiler::parse_metrics_text(text);
+  const auto parsed = hotpath::profiler::parse_metrics_text(text);
   expect_true(parsed.size() == 4, "expected all labeled series to be preserved");
   std::multimap<std::string, double> values(parsed.begin(), parsed.end());
   expect_true(values.count("vllm:num_preemptions_total") == 2, "expected two preemption series");
@@ -42,7 +42,7 @@ ignored_metric 123
   expect_true(values.find("vllm:gpu_cache_usage_perc")->second == 0.723, "bad cache value");
   expect_true(values.find("vllm:num_requests_running")->second == 84.0, "bad running value");
 
-  const std::vector<rlprof::MetricSample> samples = {
+  const std::vector<hotpath::MetricSample> samples = {
       {.sample_time = 0.0, .source = "cluster", .metric = "vllm:num_preemptions_total", .value = 3.0},
       {.sample_time = 1.0, .source = "cluster", .metric = "vllm:num_preemptions_total", .value = 5.0},
       {.sample_time = 0.0, .source = "cluster", .metric = "vllm:gpu_cache_usage_perc", .value = 0.5},
@@ -51,7 +51,7 @@ ignored_metric 123
       {.sample_time = 1.0, .source = "peer1", .metric = "vllm:num_preemptions_total", .value = 50.0},
   };
 
-  const auto summaries = rlprof::profiler::summarize_samples(samples);
+  const auto summaries = hotpath::profiler::summarize_samples(samples);
   expect_true(summaries.size() == 2, "expected two summaries");
   expect_true(summaries[0].metric == "vllm:gpu_cache_usage_perc", "unexpected first summary metric");
   expect_true(summaries[0].avg.has_value() && *summaries[0].avg == 0.625, "unexpected first avg");
@@ -63,7 +63,7 @@ ignored_metric 123
   expect_true(summaries[1].min.has_value() && *summaries[1].min == 3.0, "unexpected second min");
 
   namespace fs = std::filesystem;
-  const fs::path temp_root = fs::temp_directory_path() / "rlprof_test_vllm_metrics";
+  const fs::path temp_root = fs::temp_directory_path() / "hotpath_test_vllm_metrics";
   fs::remove_all(temp_root);
   fs::create_directories(temp_root);
   const fs::path curl_path = temp_root / "curl";
@@ -93,7 +93,7 @@ ignored_metric 123
 
   const std::string original_path = std::getenv("PATH") == nullptr ? "" : std::getenv("PATH");
   setenv("PATH", (temp_root.string() + ":" + original_path).c_str(), 1);
-  const auto fetched = rlprof::profiler::fetch_metrics_once({
+  const auto fetched = hotpath::profiler::fetch_metrics_once({
       {.source = "local", .server_url = "http://node0"},
       {.source = "peer1", .server_url = "http://node1"},
   });
@@ -114,7 +114,7 @@ ignored_metric 123
   expect_true(saw_cluster_running, "expected summed cluster running-request metric");
   expect_true(!saw_cluster_p99, "cluster percentile metrics should not be synthesized");
 
-  const auto fetched_summaries = rlprof::profiler::summarize_samples(fetched);
+  const auto fetched_summaries = hotpath::profiler::summarize_samples(fetched);
   bool saw_p99_summary = false;
   for (const auto& summary : fetched_summaries) {
     if (summary.metric == "vllm:time_to_first_token_seconds_p99") {

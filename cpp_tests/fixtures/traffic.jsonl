@@ -1,0 +1,5 @@
+{"prompt": "What is the capital of France?", "max_tokens": 64}
+{"prompt": "Explain quantum computing in simple terms.", "max_tokens": 256}
+{"prompt": "Write a haiku about programming.", "max_tokens": 32}
+{"prompt": "What are the benefits of exercise?", "max_tokens": 128}
+{"prompt": "Translate hello to Spanish, French, and German.", "max_tokens": 64}

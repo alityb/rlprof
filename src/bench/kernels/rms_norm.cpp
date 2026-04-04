@@ -1,4 +1,4 @@
-#include "rlprof/bench/kernels/rms_norm.h"
+#include "hotpath/bench/kernels/rms_norm.h"
 
 #include <algorithm>
 #include <any>
@@ -7,9 +7,9 @@
 #include <random>
 #include <vector>
 
-#include "rlprof/bench/registry.h"
+#include "hotpath/bench/registry.h"
 
-namespace rlprof::bench::kernels {
+namespace hotpath::bench::kernels {
 namespace {
 
 struct RmsNormState {
@@ -102,4 +102,4 @@ void register_rms_norm() {
       });
 }
 
-}  // namespace rlprof::bench::kernels
+}  // namespace hotpath::bench::kernels
