@@ -3,6 +3,7 @@
 build/
 dist/
 .rlprof/
+.hotpath/
 __pycache__/
 *.pyc
 *.pyo
@@ -11,6 +12,8 @@ __pycache__/
 .cache/
 *.db
 *.sqlite
+*.log
+targets.cfg
 *_meta.csv
 *_kernels.csv
 *_vllm_metrics.csv
