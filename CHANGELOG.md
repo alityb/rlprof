@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.2.0 - 2026-04-05
+
+Serving analysis, interactive TUI, and numerical hardening.
+
+Highlights:
+
+- `serve-profile` -- live dashboard with in-place redraws during traffic replay, `--concurrency N` for parallel in-flight requests, Prometheus metrics polled at 1 Hz with batch size / queue depth / KV cache tracking
+- `serve-report` -- latency percentile table (TTFB, TTFT, decode per token, e2e), KV cache hit rate and eviction counts, prefix sharing analysis, disaggregation recommendation with estimated throughput improvement
+- `disagg-config` -- deployment configs for disaggregated prefill/decode targeting vLLM, llm-d, and Dynamo
+- Interactive arrow-key menus using DEC cursor save/restore (ESC 7/8) for reliable in-place redraws across all terminal types
+- KV bytes auto-detection from HuggingFace `config.json` with full GQA support (`num_key_value_heads`, `head_dim`, dtype)
+- Clock detection fallback for GPUs where current SM clock equals hardware max (A10G and similar cloud instances)
+- Numerical fixes: cache hit rate clamped to [0, 1], eviction and preemption counts floored at 0, disaggregation throughput percentage uses `(improvement - 1) * 100` with rounding
+- JSON injection protection in traffic replayer, temp file open/write failure detection
+- `.gitignore` updated to exclude `.hotpath/` run artifacts, `*.log`, and `targets.cfg`
+- README rewritten for production use
+
 ## v0.1.2 - 2026-04-01
 
 Packaging and release automation update.
