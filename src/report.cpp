@@ -680,6 +680,20 @@ std::string render_serve_report(const ServeReportData& d) {
   o << "Latency (ms)              p50      p90      p99\n";
   o << sep << "\n";
 
+  auto format_latency = [](double value) {
+    std::ostringstream cell;
+    cell << std::fixed;
+    if (value < 1.0) {
+      cell << std::setprecision(3);
+    } else if (value < 10.0) {
+      cell << std::setprecision(2);
+    } else {
+      cell << std::setprecision(1);
+    }
+    cell << value;
+    return cell.str();
+  };
+
   auto latency_row = [&](const std::string& label, double p50, double p90, double p99) {
     // p50 < 0 means no data (sentinel -1.0 from empty latency vector)
     if (p50 < 0.0) {
@@ -687,9 +701,9 @@ std::string render_serve_report(const ServeReportData& d) {
       return;
     }
     o << std::left << std::setw(24) << label
-      << std::right << std::setw(8) << std::setprecision(1) << p50
-      << std::setw(9) << p90
-      << std::setw(9) << p99 << "\n";
+      << std::right << std::setw(8) << format_latency(p50)
+      << std::setw(9) << format_latency(p90)
+      << std::setw(9) << format_latency(p99) << "\n";
   };
 
   if (d.server_timing_available && d.queue_wait_available) {
@@ -707,7 +721,7 @@ std::string render_serve_report(const ServeReportData& d) {
   latency_row("TTFB (client)", d.prefill_p50, d.prefill_p90, d.prefill_p99);
   if (d.server_ttft_mean_ms > 0.0) {
     o << std::left << std::setw(24) << "TTFT (server, mean)"
-      << std::right << std::setw(8) << std::setprecision(1) << d.server_ttft_mean_ms
+      << std::right << std::setw(8) << format_latency(d.server_ttft_mean_ms)
       << std::setw(9) << "-"
       << std::setw(9) << "-" << "\n";
   }
@@ -718,6 +732,13 @@ std::string render_serve_report(const ServeReportData& d) {
       d.server_timing_match_method == "timestamp" &&
       d.server_timing_remote_correlation) {
     o << "Note: Server timing correlated by timestamp (±50ms accuracy)\n";
+  } else if (d.server_timing_available &&
+             d.server_timing_match_method == "order") {
+    o << "Note: Server timing correlated by request order from vLLM v1 DEBUG logs";
+    if (d.server_timing_metric_assisted) {
+      o << " and refined with Prometheus queue, prefill, and decode means";
+    }
+    o << "\n";
   }
 
   if (gpu_phase_available) {

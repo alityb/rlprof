@@ -5,6 +5,7 @@ MODEL="${MODEL:-Qwen/Qwen3.5-4B}"
 PORT="${PORT:-8000}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"
+VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-DEBUG}"
 LOG_DIR="${LOG_DIR:-.hotpath/video-server}"
 PID_FILE="${PID_FILE:-${LOG_DIR}/vllm.pid}"
 STDOUT_LOG="${STDOUT_LOG:-${LOG_DIR}/vllm.stdout.log}"
@@ -27,7 +28,7 @@ if [[ -f "${PID_FILE}" ]]; then
   rm -f "${PID_FILE}"
 fi
 
-nohup "${PYTHON_BIN}" -c "from vllm.entrypoints.cli.main import main; main()" \
+nohup env VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL}" "${PYTHON_BIN}" -c "from vllm.entrypoints.cli.main import main; main()" \
   serve "${MODEL}" \
   --port "${PORT}" \
   --tensor-parallel-size 1 \

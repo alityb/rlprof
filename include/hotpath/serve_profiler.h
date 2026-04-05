@@ -35,6 +35,7 @@ enum class ServerTraceMatchMethod {
     NONE,
     ID,
     TIMESTAMP,
+    ORDER,
 };
 
 struct ServerTraceCorrelationResult {
@@ -42,6 +43,7 @@ struct ServerTraceCorrelationResult {
     int total_requests = 0;
     ServerTraceMatchMethod method = ServerTraceMatchMethod::NONE;
     std::int64_t max_offset_us = 0;
+    bool metric_assisted = false;
 };
 
 ServerTraceCorrelationResult correlate_server_traces(

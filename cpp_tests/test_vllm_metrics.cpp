@@ -143,6 +143,12 @@ vllm:prefix_cache_hits_total{engine="0",model_name="Qwen"} 1200.0
 vllm:prefix_cache_queries_total{engine="0",model_name="Qwen"} 2000.0
 vllm:time_to_first_token_seconds_sum{engine="0",model_name="Qwen"} 0.3496
 vllm:time_to_first_token_seconds_count{engine="0",model_name="Qwen"} 18.0
+vllm:request_queue_time_seconds_sum{engine="0",model_name="Qwen"} 0.144
+vllm:request_queue_time_seconds_count{engine="0",model_name="Qwen"} 18.0
+vllm:request_prefill_time_seconds_sum{engine="0",model_name="Qwen"} 0.2056
+vllm:request_prefill_time_seconds_count{engine="0",model_name="Qwen"} 18.0
+vllm:request_decode_time_seconds_sum{engine="0",model_name="Qwen"} 4.320
+vllm:request_decode_time_seconds_count{engine="0",model_name="Qwen"} 18.0
 vllm:num_requests_running{engine="0",model_name="Qwen"} 4
 )TXT";
     const auto parsed_019 = hotpath::profiler::parse_metrics_text(text_019);
@@ -161,6 +167,18 @@ vllm:num_requests_running{engine="0",model_name="Qwen"} 4
                 "FAIL: time_to_first_token_seconds_sum should be recognized (vLLM 0.19)");
     expect_true(v019.count("vllm:time_to_first_token_seconds_count") == 1,
                 "FAIL: time_to_first_token_seconds_count should be recognized (vLLM 0.19)");
+    expect_true(v019.count("vllm:request_queue_time_seconds_sum") == 1,
+                "FAIL: request_queue_time_seconds_sum should be recognized");
+    expect_true(v019.count("vllm:request_queue_time_seconds_count") == 1,
+                "FAIL: request_queue_time_seconds_count should be recognized");
+    expect_true(v019.count("vllm:request_prefill_time_seconds_sum") == 1,
+                "FAIL: request_prefill_time_seconds_sum should be recognized");
+    expect_true(v019.count("vllm:request_prefill_time_seconds_count") == 1,
+                "FAIL: request_prefill_time_seconds_count should be recognized");
+    expect_true(v019.count("vllm:request_decode_time_seconds_sum") == 1,
+                "FAIL: request_decode_time_seconds_sum should be recognized");
+    expect_true(v019.count("vllm:request_decode_time_seconds_count") == 1,
+                "FAIL: request_decode_time_seconds_count should be recognized");
     expect_true(std::abs(v019.find("vllm:time_to_first_token_seconds_sum")->second - 0.3496) < 1e-9,
                 "FAIL: time_to_first_token_seconds_sum value mismatch");
     expect_true(v019.find("vllm:time_to_first_token_seconds_count")->second == 18.0,
@@ -197,6 +215,18 @@ vllm:num_requests_running{engine="0",model_name="Qwen"} 4
         {.sample_time = 1.0, .source = "cluster", .metric = "vllm:time_to_first_token_seconds_sum", .value = 0.35},
         {.sample_time = 0.0, .source = "cluster", .metric = "vllm:time_to_first_token_seconds_count", .value = 10.0},
         {.sample_time = 1.0, .source = "cluster", .metric = "vllm:time_to_first_token_seconds_count", .value = 18.0},
+        {.sample_time = 0.0, .source = "cluster", .metric = "vllm:request_queue_time_seconds_sum", .value = 0.10},
+        {.sample_time = 1.0, .source = "cluster", .metric = "vllm:request_queue_time_seconds_sum", .value = 0.15},
+        {.sample_time = 0.0, .source = "cluster", .metric = "vllm:request_queue_time_seconds_count", .value = 10.0},
+        {.sample_time = 1.0, .source = "cluster", .metric = "vllm:request_queue_time_seconds_count", .value = 18.0},
+        {.sample_time = 0.0, .source = "cluster", .metric = "vllm:request_prefill_time_seconds_sum", .value = 0.20},
+        {.sample_time = 1.0, .source = "cluster", .metric = "vllm:request_prefill_time_seconds_sum", .value = 0.31},
+        {.sample_time = 0.0, .source = "cluster", .metric = "vllm:request_prefill_time_seconds_count", .value = 10.0},
+        {.sample_time = 1.0, .source = "cluster", .metric = "vllm:request_prefill_time_seconds_count", .value = 18.0},
+        {.sample_time = 0.0, .source = "cluster", .metric = "vllm:request_decode_time_seconds_sum", .value = 4.00},
+        {.sample_time = 1.0, .source = "cluster", .metric = "vllm:request_decode_time_seconds_sum", .value = 4.35},
+        {.sample_time = 0.0, .source = "cluster", .metric = "vllm:request_decode_time_seconds_count", .value = 10.0},
+        {.sample_time = 1.0, .source = "cluster", .metric = "vllm:request_decode_time_seconds_count", .value = 18.0},
     };
     const auto counter_summaries = hotpath::profiler::summarize_samples(counter_samples);
     std::multimap<std::string, hotpath::MetricSummary> by_metric;
@@ -211,6 +241,18 @@ vllm:num_requests_running{engine="0",model_name="Qwen"} 4
                 "FAIL: time_to_first_token_seconds_sum should appear in summaries");
     expect_true(by_metric.count("vllm:time_to_first_token_seconds_count") == 1,
                 "FAIL: time_to_first_token_seconds_count should appear in summaries");
+    expect_true(by_metric.count("vllm:request_queue_time_seconds_sum") == 1,
+                "FAIL: request_queue_time_seconds_sum should appear in summaries");
+    expect_true(by_metric.count("vllm:request_queue_time_seconds_count") == 1,
+                "FAIL: request_queue_time_seconds_count should appear in summaries");
+    expect_true(by_metric.count("vllm:request_prefill_time_seconds_sum") == 1,
+                "FAIL: request_prefill_time_seconds_sum should appear in summaries");
+    expect_true(by_metric.count("vllm:request_prefill_time_seconds_count") == 1,
+                "FAIL: request_prefill_time_seconds_count should appear in summaries");
+    expect_true(by_metric.count("vllm:request_decode_time_seconds_sum") == 1,
+                "FAIL: request_decode_time_seconds_sum should appear in summaries");
+    expect_true(by_metric.count("vllm:request_decode_time_seconds_count") == 1,
+                "FAIL: request_decode_time_seconds_count should appear in summaries");
 
     // peak (max observed) should be the later counter value
     const auto& hits_summary = by_metric.find("vllm:prefix_cache_hits_total")->second;

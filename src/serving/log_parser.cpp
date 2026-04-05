@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -13,7 +14,7 @@ namespace hotpath {
 namespace {
 
 int64_t parse_timestamp(const std::string& line) {
-  static const std::regex ts_re(R"((\d{2}):(\d{2}):(\d{2})\.(\d{1,6}))");
+  static const std::regex ts_re(R"((\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?)");
   std::smatch match;
   if (!std::regex_search(line, match, ts_re)) {
     return 0;
@@ -21,11 +22,14 @@ int64_t parse_timestamp(const std::string& line) {
   const int64_t hours = std::stoll(match[1].str());
   const int64_t minutes = std::stoll(match[2].str());
   const int64_t seconds = std::stoll(match[3].str());
-  std::string frac = match[4].str();
-  while (frac.size() < 6) {
-    frac.push_back('0');
+  int64_t micros = 0;
+  if (match[4].matched) {
+    std::string frac = match[4].str();
+    while (frac.size() < 6) {
+      frac.push_back('0');
+    }
+    micros = std::stoll(frac);
   }
-  const int64_t micros = std::stoll(frac);
   return ((hours * 3600 + minutes * 60 + seconds) * 1000000) + micros;
 }
 
@@ -225,6 +229,163 @@ void discard_invalid_timing(RequestTrace& trace) {
   trace.server_timing_available = false;
 }
 
+bool line_has_v1_batch_descriptor(const std::string& line) {
+  return line.find("BatchDescriptor(") != std::string::npos &&
+         line.find("num_tokens=") != std::string::npos;
+}
+
+int extract_batch_num_tokens(const std::string& line) {
+  static const std::regex num_tokens_re(R"(num_tokens=(\d+))");
+  std::smatch match;
+  if (std::regex_search(line, match, num_tokens_re)) {
+    return std::stoi(match[1].str());
+  }
+  return 0;
+}
+
+bool line_has_v1_request_boundary(const std::string& line) {
+  return line.find("EngineCore loop active.") != std::string::npos ||
+         line.find("EngineCore waiting for work.") != std::string::npos ||
+         line.find("\"POST /v1/completions HTTP/1.1\" 200 OK") != std::string::npos ||
+         line.find("\"POST /v1/chat/completions HTTP/1.1\" 200 OK") != std::string::npos ||
+         line.find("\"POST /v1/responses HTTP/1.1\" 200 OK") != std::string::npos;
+}
+
+std::vector<RequestTrace> parse_vllm_v1_anonymous_traces(const std::vector<std::string>& lines) {
+  std::vector<RequestTrace> traces;
+  RequestTrace current;
+  bool current_open = false;
+  int64_t last_batch_ts = 0;
+  int next_trace_index = 1;
+
+  auto open_trace = [&](int64_t ts) {
+    current = RequestTrace{};
+    std::ostringstream id;
+    id << "v1-anon-" << std::setw(6) << std::setfill('0') << next_trace_index++;
+    current.request_id = id.str();
+    current.arrival_us = ts;
+    current.queue_start_us = ts;
+    current.status = "ok";
+    current.events.push_back(RequestEvent{
+        .event_type = "queue",
+        .timestamp_us = ts,
+        .detail = R"({"source":"vllm_v1"})",
+    });
+    current_open = true;
+    last_batch_ts = 0;
+  };
+
+  auto close_trace = [&](int64_t ts) {
+    if (!current_open) return;
+    if (current.prefill_start_us == 0 && last_batch_ts > 0) {
+      current.prefill_start_us = last_batch_ts;
+    }
+    if (current.prefill_end_us == 0 && last_batch_ts > 0) {
+      current.prefill_end_us = last_batch_ts;
+    }
+    if (current.server_last_token_us == 0) {
+      current.server_last_token_us = last_batch_ts > 0 ? last_batch_ts : ts;
+    }
+    if (current.first_token_us == 0 && current.prefill_end_us > 0) {
+      current.first_token_us = current.prefill_end_us;
+    }
+    current.server_timing_available =
+        current.prefill_start_us > 0 &&
+        current.prefill_end_us >= current.prefill_start_us &&
+        current.server_last_token_us >= current.prefill_end_us;
+    if (current.server_timing_available) {
+      traces.push_back(std::move(current));
+    }
+    current = RequestTrace{};
+    current_open = false;
+    last_batch_ts = 0;
+  };
+
+  for (const auto& line : lines) {
+    const int64_t ts = parse_timestamp(line);
+    if (line.find("EngineCore loop active.") != std::string::npos) {
+      if (!current_open) {
+        open_trace(ts);
+      } else if (current.server_last_token_us > 0) {
+        close_trace(ts);
+        open_trace(ts);
+      }
+      current.events.push_back(RequestEvent{
+          .event_type = "schedule",
+          .timestamp_us = ts,
+          .detail = R"({"source":"enginecore_loop_active"})",
+      });
+      continue;
+    }
+
+    if (line_has_v1_batch_descriptor(line)) {
+      if (!current_open) {
+        open_trace(ts);
+      }
+      const int num_tokens = extract_batch_num_tokens(line);
+      last_batch_ts = ts;
+      if (num_tokens > 1 && current.prefill_start_us == 0) {
+        current.prefill_start_us = ts;
+        current.prompt_tokens = num_tokens;
+        current.events.push_back(RequestEvent{
+            .event_type = "prefill",
+            .timestamp_us = ts,
+            .detail = "{\"num_tokens\":" + std::to_string(num_tokens) + "}",
+        });
+      } else if (num_tokens == 1) {
+        if (current.prefill_start_us == 0) {
+          current.prefill_start_us = ts;
+        }
+        if (current.prefill_end_us == 0) {
+          current.prefill_end_us = ts;
+          current.first_token_us = ts;
+        }
+        current.server_last_token_us = ts;
+        current.events.push_back(RequestEvent{
+            .event_type = "decode",
+            .timestamp_us = ts,
+            .detail = R"({"num_tokens":1})",
+        });
+      }
+      continue;
+    }
+
+    if (line.find("EngineCore waiting for work.") != std::string::npos) {
+      if (current_open) {
+        current.events.push_back(RequestEvent{
+            .event_type = "decode",
+            .timestamp_us = ts,
+            .detail = R"({"source":"enginecore_waiting"})",
+        });
+        close_trace(ts);
+      }
+      continue;
+    }
+
+    if ((line.find("\"POST /v1/completions HTTP/1.1\" 200 OK") != std::string::npos ||
+         line.find("\"POST /v1/chat/completions HTTP/1.1\" 200 OK") != std::string::npos ||
+         line.find("\"POST /v1/responses HTTP/1.1\" 200 OK") != std::string::npos) &&
+        current_open) {
+      if (current.prefill_end_us == 0 && current.prefill_start_us > 0) {
+        current.prefill_end_us = ts;
+        current.first_token_us = ts;
+      }
+      current.server_last_token_us = std::max(current.server_last_token_us, ts);
+      current.events.push_back(RequestEvent{
+          .event_type = "schedule",
+          .timestamp_us = ts,
+          .detail = R"({"source":"api_response"})",
+      });
+    }
+  }
+
+  if (current_open) {
+    close_trace(last_batch_ts > 0 ? last_batch_ts : current.queue_start_us);
+  }
+
+  return traces;
+}
+
 }  // namespace
 
 VllmLogParseResult parse_vllm_log_lines_detailed(const std::vector<std::string>& lines) {
@@ -375,6 +536,15 @@ VllmLogParseResult parse_vllm_log_lines_detailed(const std::vector<std::string>&
       trace.status = "ok";
     }
     result.push_back(std::move(trace));
+  }
+
+  if (result.empty()) {
+    const bool looks_like_v1 = std::any_of(lines.begin(), lines.end(), [](const std::string& line) {
+      return line_has_v1_request_boundary(line) || line_has_v1_batch_descriptor(line);
+    });
+    if (looks_like_v1) {
+      result = parse_vllm_v1_anonymous_traces(lines);
+    }
   }
 
   return VllmLogParseResult{

@@ -175,6 +175,33 @@ int main() {
                 "TTFB client value 4.2 should appear in report");
   }
 
+  {
+    hotpath::ServeReportData precise;
+    precise.model_name = "precise";
+    precise.engine = "vllm";
+    precise.gpu_info = "1x A10G";
+    precise.queue_wait_available = true;
+    precise.server_timing_available = true;
+    precise.server_timing_match_method = "order";
+    precise.server_timing_metric_assisted = true;
+    precise.queue_p50 = 0.011;
+    precise.queue_p90 = 0.011;
+    precise.queue_p99 = 0.011;
+    precise.server_prefill_p50 = 12.273;
+    precise.server_prefill_p90 = 12.273;
+    precise.server_prefill_p99 = 12.273;
+    precise.server_decode_p50 = 7496.4;
+    precise.server_decode_p90 = 7496.4;
+    precise.server_decode_p99 = 7496.4;
+    precise.prefill_p50 = 12.284;
+    const std::string precise_report = hotpath::render_serve_report(precise);
+    expect_true(contains(precise_report, "0.011"),
+                "small queue waits should render with sub-millisecond precision");
+    expect_true(contains(precise_report,
+                         "refined with Prometheus queue, prefill, and decode means"),
+                "metric-assisted order correlation note should mention decode means");
+  }
+
   // server_ttft_mean_ms = -1 (default) should NOT produce a server TTFT row
   {
     hotpath::ServeReportData no_ttft;

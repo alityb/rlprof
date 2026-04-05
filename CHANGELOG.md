@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.2.7 - 2026-04-05
+
+vLLM v1 timing correctness and reporting fixes.
+
+Highlights:
+
+- `serve-profile` now parses and uses vLLM 0.19 request histograms for queue, prefill, and decode timing, which removes the worst second-resolution artifacts from `ORDER`-matched v1 logs
+- reused `--output` directories now start from a fresh `serve_profile.db`, so stale request traces from older runs do not leak into new reports
+- `serve-report` now shows sub-millisecond latency values when needed, so tiny queue waits like `0.013 ms` do not round down to `0.0`
+- fixed `server_timing_match_method` persistence and updated the report note to explain when queue, prefill, and decode are refined from Prometheus metrics
+- expanded regression coverage for vLLM 0.19 histogram parsing and serve-report formatting
+
 ## v0.2.6 - 2026-04-05
 
 serve-profile UX fixes for the local video flow.

@@ -2663,6 +2663,8 @@ int handle_serve_report(const Args& args) {
   d.server_timing_max_offset_ms = get_d("latency.server_timing_match_max_offset_ms");
   d.server_timing_remote_correlation =
       get("latency.server_timing_remote_correlation") == "true";
+  d.server_timing_metric_assisted =
+      get("latency.server_timing_metric_assisted") == "true";
   d.queue_p50 = get_d("latency.queue_p50");
   d.queue_p90 = get_d("latency.queue_p90");
   d.queue_p99 = get_d("latency.queue_p99");
@@ -3092,7 +3094,7 @@ int main(int argc, char** argv) {
     }
 
     if (command == "version") {
-      std::cout << "hotpath 0.2.6\n";
+      std::cout << "hotpath 0.2.7\n";
       return 0;
     }
 

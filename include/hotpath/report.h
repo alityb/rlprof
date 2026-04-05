@@ -58,6 +58,7 @@ struct ServeReportData {
   std::string server_timing_match_method;
   double server_timing_max_offset_ms = 0.0;
   bool server_timing_remote_correlation = false;
+  bool server_timing_metric_assisted = false;
   // Latency percentiles (ms)
   double server_ttft_mean_ms = -1.0;  // from Prometheus histogram; -1 = not available
   double queue_p50 = 0, queue_p90 = 0, queue_p99 = 0;

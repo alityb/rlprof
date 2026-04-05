@@ -158,6 +158,54 @@ int main() {
   expect_true(far_result.matched_requests == 0,
               "timestamp fallback should not false-match distant requests");
 
+  const std::vector<std::string> v1_lines = {
+      "DEBUG 04-05 22:17:49 [v1/engine/core.py:1170] EngineCore loop active.",
+      "DEBUG 04-05 22:17:49 [v1/worker/gpu_model_runner.py:3888] Running batch with cudagraph_mode: NONE, batch_descriptor: BatchDescriptor(num_tokens=103, num_reqs=None, uniform=False, has_lora=False, num_active_loras=0), should_ubatch: False, num_tokens_across_dp: None",
+      "DEBUG 04-05 22:17:50 [v1/worker/gpu_model_runner.py:3888] Running batch with cudagraph_mode: NONE, batch_descriptor: BatchDescriptor(num_tokens=1, num_reqs=None, uniform=False, has_lora=False, num_active_loras=0), should_ubatch: False, num_tokens_across_dp: None",
+      "DEBUG 04-05 22:17:51 [v1/worker/gpu_model_runner.py:3888] Running batch with cudagraph_mode: NONE, batch_descriptor: BatchDescriptor(num_tokens=1, num_reqs=None, uniform=False, has_lora=False, num_active_loras=0), should_ubatch: False, num_tokens_across_dp: None",
+      "DEBUG 04-05 22:17:52 [v1/engine/core.py:1158] EngineCore waiting for work.",
+      "DEBUG 04-05 22:18:00 [v1/engine/core.py:1170] EngineCore loop active.",
+      "DEBUG 04-05 22:18:00 [v1/worker/gpu_model_runner.py:3888] Running batch with cudagraph_mode: NONE, batch_descriptor: BatchDescriptor(num_tokens=88, num_reqs=None, uniform=False, has_lora=False, num_active_loras=0), should_ubatch: False, num_tokens_across_dp: None",
+      "DEBUG 04-05 22:18:01 [v1/worker/gpu_model_runner.py:3888] Running batch with cudagraph_mode: NONE, batch_descriptor: BatchDescriptor(num_tokens=1, num_reqs=None, uniform=False, has_lora=False, num_active_loras=0), should_ubatch: False, num_tokens_across_dp: None",
+      "DEBUG 04-05 22:18:02 [v1/engine/core.py:1158] EngineCore waiting for work.",
+      "INFO 04-05 22:18:08 [v1/metrics/loggers.py:259] Engine 000: Avg prompt throughput: 18.6 tokens/s, Avg generation throughput: 29.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.6%, Prefix cache hit rate: 12.5%",
+  };
+  const auto v1_detailed = hotpath::parse_vllm_log_lines_detailed(v1_lines);
+  expect_true(v1_detailed.traces.size() == 2,
+              "expected 2 anonymous traces from vLLM v1 logs");
+  expect_true(v1_detailed.aggregate_cache_hit_rate.has_value(),
+              "v1 aggregate cache hit rate should be parsed");
+  expect_true(std::abs(*v1_detailed.aggregate_cache_hit_rate - 0.125) < 1e-9,
+              "v1 aggregate cache hit rate should equal 0.125");
+  expect_true(v1_detailed.traces[0].prompt_tokens == 103,
+              "first v1 trace should capture prefill token count");
+  expect_true(v1_detailed.traces[1].prompt_tokens == 88,
+              "second v1 trace should capture prefill token count");
+  for (const auto& trace : v1_detailed.traces) {
+    expect_true(trace.server_timing_available,
+                "v1 anonymous trace should carry server timing");
+    expect_true(trace.prefill_start_us > 0, "v1 anonymous trace should have prefill_start");
+    expect_true(trace.prefill_end_us >= trace.prefill_start_us,
+                "v1 anonymous trace should have sane prefill timing");
+    expect_true(trace.server_last_token_us >= trace.prefill_end_us,
+                "v1 anonymous trace should have sane decode timing");
+  }
+
+  std::vector<hotpath::RequestTrace> v1_client_traces = {
+      hotpath::RequestTrace{.request_id = "cmpl-v1-1", .arrival_us = 1000000},
+      hotpath::RequestTrace{.request_id = "cmpl-v1-2", .arrival_us = 2000000},
+  };
+  const auto v1_correlated =
+      hotpath::correlate_server_traces(v1_client_traces, v1_detailed.traces);
+  expect_true(v1_correlated.method == hotpath::ServerTraceMatchMethod::ORDER,
+              "v1 anonymous traces should fall back to order-based matching");
+  expect_true(v1_correlated.matched_requests == 2,
+              "order fallback should match both v1 traces");
+  for (const auto& trace : v1_client_traces) {
+    expect_true(trace.server_timing_available,
+                "order-correlated client trace should gain server timing");
+  }
+
   // ── CUDA graph capture lines must not produce traces ──
   // These appeared in real vLLM logs and were previously misidentified as request IDs.
   {

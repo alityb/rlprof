@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -16,6 +17,7 @@
 #include <map>
 #include <mutex>
 #include <numeric>
+#include <limits>
 #include <optional>
 #include <regex>
 #include <sstream>
@@ -47,6 +49,13 @@ namespace hotpath {
 namespace {
 
 std::string trim(std::string value);
+
+struct ServerTimingMeans {
+  double ttft_mean_ms = -1.0;
+  double queue_mean_ms = -1.0;
+  double prefill_mean_ms = -1.0;
+  double decode_mean_ms = -1.0;
+};
 
 std::string run_cmd(const std::string& cmd) {
   std::array<char, 4096> buf{};
@@ -92,6 +101,63 @@ double percentile_vec(std::vector<double> v, double p) {
   const size_t hi = std::min(lo + 1, v.size() - 1);
   const double frac = idx - static_cast<double>(lo);
   return v[lo] * (1.0 - frac) + v[hi] * frac;
+}
+
+double histogram_counter_mean_ms(
+    const std::vector<MetricSample>& metric_samples,
+    const std::string& sum_metric,
+    const std::string& count_metric) {
+  double min_sum = std::numeric_limits<double>::max();
+  double max_sum = -1.0;
+  double min_count = std::numeric_limits<double>::max();
+  double max_count = -1.0;
+  for (const auto& sample : metric_samples) {
+    if (sample.source != "cluster") continue;
+    if (sample.metric == sum_metric) {
+      min_sum = std::min(min_sum, sample.value);
+      max_sum = std::max(max_sum, sample.value);
+    } else if (sample.metric == count_metric) {
+      min_count = std::min(min_count, sample.value);
+      max_count = std::max(max_count, sample.value);
+    }
+  }
+
+  const double delta_count = max_count - min_count;
+  const double delta_sum = max_sum - min_sum;
+  if (delta_count > 0.0 && delta_sum >= 0.0) {
+    return (delta_sum / delta_count) * 1000.0;
+  }
+  if (max_count > 0.0 && max_sum >= 0.0) {
+    return (max_sum / max_count) * 1000.0;
+  }
+  return -1.0;
+}
+
+ServerTimingMeans derive_server_timing_means(
+    const std::vector<MetricSample>& metric_samples) {
+  ServerTimingMeans means;
+  means.ttft_mean_ms = histogram_counter_mean_ms(
+      metric_samples,
+      "vllm:time_to_first_token_seconds_sum",
+      "vllm:time_to_first_token_seconds_count");
+  means.queue_mean_ms = histogram_counter_mean_ms(
+      metric_samples,
+      "vllm:request_queue_time_seconds_sum",
+      "vllm:request_queue_time_seconds_count");
+  means.prefill_mean_ms = histogram_counter_mean_ms(
+      metric_samples,
+      "vllm:request_prefill_time_seconds_sum",
+      "vllm:request_prefill_time_seconds_count");
+  means.decode_mean_ms = histogram_counter_mean_ms(
+      metric_samples,
+      "vllm:request_decode_time_seconds_sum",
+      "vllm:request_decode_time_seconds_count");
+  if (means.prefill_mean_ms < 0.0 &&
+      means.ttft_mean_ms > 0.0 &&
+      means.queue_mean_ms >= 0.0) {
+    means.prefill_mean_ms = std::max(0.0, means.ttft_mean_ms - means.queue_mean_ms);
+  }
+  return means;
 }
 
 // ── Live dashboard helpers ────────────────────────────────────────────────────
@@ -548,6 +614,13 @@ std::map<std::string, RequestTrace> traces_by_request_id(
   return by_request_id;
 }
 
+bool traces_use_anonymous_v1_ids(const std::vector<RequestTrace>& traces) {
+  if (traces.empty()) return false;
+  return std::all_of(traces.begin(), traces.end(), [](const RequestTrace& trace) {
+    return trace.request_id.rfind("v1-anon-", 0) == 0;
+  });
+}
+
 bool sane_server_trace(const RequestTrace& trace) {
   if (trace.queue_start_us <= 0 || trace.prefill_start_us <= 0 ||
       trace.prefill_end_us <= 0) {
@@ -580,6 +653,113 @@ void apply_server_trace(RequestTrace& client, const RequestTrace& server) {
   if (!server.events.empty()) {
     client.events.insert(client.events.end(), server.events.begin(), server.events.end());
   }
+}
+
+bool refine_order_matched_v1_timing(
+    std::vector<RequestTrace>& traces,
+    const ServerTraceCorrelationResult& trace_correlation,
+    const ServerTimingMeans& means) {
+  if (trace_correlation.method != ServerTraceMatchMethod::ORDER) {
+    return false;
+  }
+
+  const double queue_mean_us = means.queue_mean_ms > 0.0 ? means.queue_mean_ms * 1000.0 : 0.0;
+  const double prefill_mean_us =
+      means.prefill_mean_ms > 0.0 ? means.prefill_mean_ms * 1000.0 : 0.0;
+  const double decode_mean_us =
+      means.decode_mean_ms > 0.0 ? means.decode_mean_ms * 1000.0 : 0.0;
+  const double split_total_us = queue_mean_us + prefill_mean_us;
+  if (split_total_us <= 0.0) {
+    return false;
+  }
+
+  double client_decode_mean_us = -1.0;
+  {
+    double total_client_decode_us = 0.0;
+    int client_decode_samples = 0;
+    for (const auto& trace : traces) {
+      if (trace.last_token_us > trace.first_token_us) {
+        total_client_decode_us += static_cast<double>(trace.last_token_us - trace.first_token_us);
+        ++client_decode_samples;
+      }
+    }
+    if (client_decode_samples > 0) {
+      client_decode_mean_us =
+          total_client_decode_us / static_cast<double>(client_decode_samples);
+    }
+  }
+
+  bool refined_any = false;
+  for (auto& trace : traces) {
+    if (!trace.server_timing_available || trace.arrival_us <= 0) {
+      continue;
+    }
+
+    std::int64_t decode_us_i = 0;
+    if (trace.server_last_token_us > 0 &&
+        trace.prefill_end_us > 0 &&
+        trace.server_last_token_us >= trace.prefill_end_us) {
+      decode_us_i = trace.server_last_token_us - trace.prefill_end_us;
+    }
+
+    double target_total_us = 0.0;
+    if (trace.first_token_us > trace.arrival_us) {
+      target_total_us = static_cast<double>(trace.first_token_us - trace.arrival_us);
+    } else if (means.ttft_mean_ms > 0.0) {
+      target_total_us = means.ttft_mean_ms * 1000.0;
+    } else {
+      target_total_us = split_total_us;
+    }
+    if (target_total_us <= 0.0) {
+      continue;
+    }
+
+    double queue_us = 0.0;
+    double prefill_us = 0.0;
+    if (queue_mean_us > 0.0 && prefill_mean_us > 0.0) {
+      const double scale = target_total_us / split_total_us;
+      queue_us = queue_mean_us * scale;
+      prefill_us = prefill_mean_us * scale;
+    } else if (queue_mean_us > 0.0) {
+      queue_us = std::min(queue_mean_us, target_total_us);
+      prefill_us = std::max(0.0, target_total_us - queue_us);
+    } else {
+      prefill_us = std::min(prefill_mean_us, target_total_us);
+      queue_us = std::max(0.0, target_total_us - prefill_us);
+    }
+
+    std::int64_t queue_us_i = static_cast<std::int64_t>(std::llround(queue_us));
+    std::int64_t prefill_us_i = static_cast<std::int64_t>(std::llround(prefill_us));
+    const std::int64_t total_us_i = static_cast<std::int64_t>(std::llround(target_total_us));
+    if (queue_us_i + prefill_us_i != total_us_i) {
+      prefill_us_i = std::max<std::int64_t>(0, total_us_i - queue_us_i);
+    }
+
+    trace.queue_start_us = trace.arrival_us;
+    trace.prefill_start_us = trace.queue_start_us + queue_us_i;
+    trace.prefill_end_us = trace.prefill_start_us + prefill_us_i;
+    if (trace.first_token_us > 0) {
+      trace.prefill_end_us = std::min(trace.prefill_end_us, trace.first_token_us);
+      trace.prefill_start_us = std::min(trace.prefill_start_us, trace.prefill_end_us);
+    }
+    if (decode_mean_us > 0.0) {
+      double target_decode_us = decode_mean_us;
+      if (client_decode_mean_us > 0.0 && trace.last_token_us > trace.first_token_us) {
+        const double client_decode_us =
+            static_cast<double>(trace.last_token_us - trace.first_token_us);
+        target_decode_us = client_decode_us * (decode_mean_us / client_decode_mean_us);
+      }
+      decode_us_i = static_cast<std::int64_t>(std::llround(target_decode_us));
+    }
+
+    trace.server_last_token_us = trace.prefill_end_us + decode_us_i;
+    if (trace.server_last_token_us < trace.prefill_end_us) {
+      trace.server_last_token_us = trace.prefill_end_us;
+    }
+    trace.server_timing_available = sane_server_trace(trace);
+    refined_any = refined_any || trace.server_timing_available;
+  }
+  return refined_any;
 }
 
 std::int64_t server_trace_anchor_us(const RequestTrace& trace) {
@@ -671,6 +851,42 @@ ServerTraceCorrelationResult correlate_server_traces(
 
   result.method = result.matched_requests > 0 ? ServerTraceMatchMethod::TIMESTAMP
                                               : ServerTraceMatchMethod::NONE;
+  if (result.matched_requests == 0 &&
+      traces_use_anonymous_v1_ids(server_traces) &&
+      server_traces.size() >= client_traces.size() &&
+      !client_traces.empty()) {
+    std::vector<std::pair<std::size_t, std::int64_t>> client_order;
+    client_order.reserve(client_traces.size());
+    for (std::size_t i = 0; i < client_traces.size(); ++i) {
+      const std::int64_t anchor = client_traces[i].arrival_us > 0
+          ? client_traces[i].arrival_us
+          : client_traces[i].completion_us;
+      client_order.emplace_back(i, anchor);
+    }
+    std::stable_sort(client_order.begin(), client_order.end(),
+                     [](const auto& a, const auto& b) { return a.second < b.second; });
+
+    std::vector<std::pair<std::size_t, std::int64_t>> server_order;
+    server_order.reserve(server_traces.size());
+    for (std::size_t i = 0; i < server_traces.size(); ++i) {
+      server_order.emplace_back(i, server_trace_anchor_us(server_traces[i]));
+    }
+    std::stable_sort(server_order.begin(), server_order.end(),
+                     [](const auto& a, const auto& b) { return a.second < b.second; });
+
+    const std::size_t server_start =
+        server_order.size() > client_order.size()
+            ? server_order.size() - client_order.size()
+            : 0;
+
+    for (std::size_t i = 0; i < client_order.size(); ++i) {
+      apply_server_trace(client_traces[client_order[i].first],
+                         server_traces[server_order[server_start + i].first]);
+      ++result.matched_requests;
+    }
+    result.method = ServerTraceMatchMethod::ORDER;
+    result.max_offset_us = 0;
+  }
   return result;
 }
 
@@ -688,12 +904,16 @@ std::optional<std::filesystem::path> discover_server_log_path(
 
   std::vector<fs::path> candidates = {
       output_parent / "video-server" / "vllm.stderr.log",
+      output_parent / "video-server" / "vllm.stdout.log",
       output_parent / "video-server" / "vllm.log",
       output_parent / "video-server" / "server.log",
       output_dir / "vllm.stderr.log",
+      output_dir / "vllm.stdout.log",
       output_dir / "vllm.log",
       fs::path(".hotpath/video-server/vllm.stderr.log"),
+      fs::path(".hotpath/video-server/vllm.stdout.log"),
       fs::path(".hotpath/video-server/vllm.log"),
+      fs::path("vllm.stdout.log"),
       fs::path("vllm.stderr.log"),
       fs::path("vllm.log"),
   };
@@ -704,6 +924,10 @@ std::optional<std::filesystem::path> discover_server_log_path(
   for (const fs::path& candidate : candidates) {
     std::error_code ec;
     if (!fs::is_regular_file(candidate, ec)) {
+      continue;
+    }
+    const auto size = fs::file_size(candidate, ec);
+    if (ec || size == 0) {
       continue;
     }
     const fs::file_time_type mtime = fs::last_write_time(candidate, ec);
@@ -768,6 +992,9 @@ int run_serve_profile(const ServeProfileOptions& opts) {
   const fs::path output_dir(opts.output);
   fs::create_directories(output_dir);
   const fs::path db_path = output_dir / "serve_profile.db";
+  if (fs::exists(db_path)) {
+    fs::remove(db_path);
+  }
   init_db(db_path);
 
   std::optional<profiler::ManagedServerState> managed_server;
@@ -1194,35 +1421,8 @@ int run_serve_profile(const ServeProfileOptions& opts) {
   }
 
   // ── Derive server-side metrics from Prometheus counter/histogram deltas ──
-  // These require delta computation (final - initial) since they are monotonic counters.
-
-  // Server TTFT mean from vLLM 0.19+ histogram (sum/count).
-  // Sentinel pattern: min starts at +∞, max starts at -1.
-  // If no matching samples exist: delta = max - min = -1 - (+∞) < 0 → guard fails → stays -1.
-  // If one sample exists: delta = 0 → guard (delta_count > 0) fails → no mean computed.
-  // Requires at least two samples (one at start, one at end of collection window).
-  double server_ttft_mean_ms = -1.0;
-  {
-    double min_sum = std::numeric_limits<double>::max();
-    double max_sum = -1.0;
-    double min_count = std::numeric_limits<double>::max();
-    double max_count = -1.0;
-    for (const auto& s : metric_samples) {
-      if (s.source != "cluster") continue;
-      if (s.metric == "vllm:time_to_first_token_seconds_sum") {
-        min_sum = std::min(min_sum, s.value);
-        max_sum = std::max(max_sum, s.value);
-      } else if (s.metric == "vllm:time_to_first_token_seconds_count") {
-        min_count = std::min(min_count, s.value);
-        max_count = std::max(max_count, s.value);
-      }
-    }
-    const double delta_count = max_count - min_count;
-    const double delta_sum = max_sum - min_sum;
-    if (delta_count > 0.0 && delta_sum >= 0.0) {
-      server_ttft_mean_ms = (delta_sum / delta_count) * 1000.0;
-    }
-  }
+  const ServerTimingMeans server_timing_means = derive_server_timing_means(metric_samples);
+  const double server_ttft_mean_ms = server_timing_means.ttft_mean_ms;
 
   // Prefix cache hit rate from vLLM 0.19+ counter deltas (hits / queries).
   // Same sentinel pattern as above: no matching samples → delta < 0 → guard fails → stays -1.
@@ -1311,6 +1511,10 @@ int run_serve_profile(const ServeProfileOptions& opts) {
       } else if (log_parse.aggregate_cache_hit_rate.has_value()) {
         std::cerr << "Server log: aggregate cache hit rate extracted (no per-request traces "
                   << "— vLLM v1 engine does not log per-request debug lines)\n";
+      } else {
+        std::cerr << "Server log found at " << server_log_path->string()
+                  << " but no per-request DEBUG timing lines were parsed.\n"
+                  << "  Restart the server with VLLM_LOGGING_LEVEL=DEBUG and capture stdout/stderr to a file.\n";
       }
       if (trace_correlation.method == ServerTraceMatchMethod::ID) {
         std::cerr << "Matched " << trace_correlation.matched_requests << "/"
@@ -1319,6 +1523,14 @@ int run_serve_profile(const ServeProfileOptions& opts) {
         std::cerr << "ID matching failed. Matched " << trace_correlation.matched_requests << "/"
                   << trace_correlation.total_requests << " requests by timestamp (+/-"
                   << (trace_correlation.max_offset_us / 1000.0) << "ms max offset)\n";
+      } else if (trace_correlation.method == ServerTraceMatchMethod::ORDER) {
+        std::cerr << "ID/timestamp matching unavailable. Matched "
+                  << trace_correlation.matched_requests << "/"
+                  << trace_correlation.total_requests
+                  << " requests by observed request order\n";
+        if (refine_order_matched_v1_timing(traces, trace_correlation, server_timing_means)) {
+          trace_correlation.metric_assisted = true;
+        }
       } else if (!log_parse.traces.empty() && !traces.empty()) {
         // Only warn with ID details if the IDs looked like real request IDs
         std::cerr
@@ -1549,16 +1761,21 @@ int run_serve_profile(const ServeProfileOptions& opts) {
   // (e.g. when vLLM logs prefill start but not the "Added request" line).
   save_kv(analysis, "latency", "queue_available", !queue_lat.empty());
   save_kv(analysis, "latency", "server_timing_available", server_timing_available);
-  save_kv(analysis, "latency", "server_timing_match_method",
-          trace_correlation.method == ServerTraceMatchMethod::ID
-              ? "id"
-              : (trace_correlation.method == ServerTraceMatchMethod::TIMESTAMP
-                     ? "timestamp"
-                     : "none"));
+  const std::string server_timing_match_method =
+      trace_correlation.method == ServerTraceMatchMethod::ID
+          ? "id"
+          : (trace_correlation.method == ServerTraceMatchMethod::TIMESTAMP
+                 ? "timestamp"
+                 : (trace_correlation.method == ServerTraceMatchMethod::ORDER
+                        ? "order"
+                        : "none"));
+  save_kv(analysis, "latency", "server_timing_match_method", server_timing_match_method);
   save_kv(analysis, "latency", "server_timing_match_max_offset_ms",
           trace_correlation.max_offset_us / 1000.0);
   save_kv(analysis, "latency", "server_timing_remote_correlation",
           remote_timestamp_correlation);
+  save_kv(analysis, "latency", "server_timing_metric_assisted",
+          trace_correlation.metric_assisted);
 
   // Latency percentiles
   save_kv(analysis, "latency", "queue_p50", percentile_vec(queue_lat, 50));
