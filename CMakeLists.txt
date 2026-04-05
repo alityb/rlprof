@@ -294,6 +294,13 @@ if(BUILD_TESTING)
   add_test(NAME test_serve_report COMMAND test_serve_report)
 
   add_executable(
+    test_serve_profiler
+    cpp_tests/test_serve_profiler.cpp
+  )
+  target_link_libraries(test_serve_profiler PRIVATE hotpath_core)
+  add_test(NAME test_serve_profiler COMMAND test_serve_profiler)
+
+  add_executable(
     test_traffic_replayer
     cpp_tests/test_traffic_replayer.cpp
   )

@@ -674,6 +674,50 @@ ServerTraceCorrelationResult correlate_server_traces(
   return result;
 }
 
+std::optional<std::filesystem::path> discover_server_log_path(
+    const ServeProfileOptions& opts) {
+  namespace fs = std::filesystem;
+  if (opts.engine != "vllm" || !endpoint_is_local(opts.endpoint)) {
+    return std::nullopt;
+  }
+
+  const fs::path output_dir =
+      opts.output.empty() ? fs::path(".hotpath/serve_run") : fs::path(opts.output);
+  const fs::path output_parent =
+      output_dir.has_parent_path() ? output_dir.parent_path() : fs::path(".");
+
+  std::vector<fs::path> candidates = {
+      output_parent / "video-server" / "vllm.stderr.log",
+      output_parent / "video-server" / "vllm.log",
+      output_parent / "video-server" / "server.log",
+      output_dir / "vllm.stderr.log",
+      output_dir / "vllm.log",
+      fs::path(".hotpath/video-server/vllm.stderr.log"),
+      fs::path(".hotpath/video-server/vllm.log"),
+      fs::path("vllm.stderr.log"),
+      fs::path("vllm.log"),
+  };
+  candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+
+  std::optional<fs::path> best_path;
+  std::optional<fs::file_time_type> best_mtime;
+  for (const fs::path& candidate : candidates) {
+    std::error_code ec;
+    if (!fs::is_regular_file(candidate, ec)) {
+      continue;
+    }
+    const fs::file_time_type mtime = fs::last_write_time(candidate, ec);
+    if (ec) {
+      continue;
+    }
+    if (!best_path.has_value() || mtime > *best_mtime) {
+      best_path = candidate;
+      best_mtime = mtime;
+    }
+  }
+  return best_path;
+}
+
 GpuInfo detect_gpus() {
   GpuInfo info;
   const std::string count_str = run_cmd("nvidia-smi --query-gpu=count --format=csv,noheader -i 0");
@@ -804,10 +848,14 @@ int run_serve_profile(const ServeProfileOptions& opts) {
     server_log_path = fs::path(opts.server_log_path);
   } else if (managed_server.has_value()) {
     server_log_path = managed_server->log_path;
+  } else if (auto discovered = discover_server_log_path(opts); discovered.has_value()) {
+    server_log_path = *discovered;
+    std::cerr << "Auto-discovered vLLM server log: " << server_log_path->string() << "\n";
   }
   if (opts.engine == "vllm" && !server_log_path.has_value()) {
     std::cerr << "Queue wait timing requires access to vLLM server logs.\n";
     std::cerr << "Set VLLM_LOGGING_LEVEL=DEBUG and pass --server-log <path> to enable server-side timing.\n";
+    std::cerr << "Demo note: examples/start_qwen35_video_server.sh writes logs to .hotpath/video-server/vllm.stderr.log.\n";
   }
 
   std::optional<fs::path> nsys_sqlite_path;

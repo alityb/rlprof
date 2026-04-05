@@ -50,6 +50,9 @@ ServerTraceCorrelationResult correlate_server_traces(
     bool allow_timestamp_fallback = true,
     std::int64_t max_timestamp_offset_us = 50000);
 
+std::optional<std::filesystem::path> discover_server_log_path(
+    const ServeProfileOptions& opts);
+
 int run_serve_profile(const ServeProfileOptions& opts);
 
 }  // namespace hotpath

@@ -2835,16 +2835,33 @@ int main(int argc, char** argv) {
         const auto duration = hotpath::interactive::prompt_int("Duration (seconds)", 60);
         if (!duration.has_value()) return 0;
 
+        const auto concurrency = hotpath::interactive::prompt_int("Concurrency", 1);
+        if (!concurrency.has_value()) return 0;
+
         const auto traffic = hotpath::interactive::prompt_string(
             "Traffic file (JSONL path, or empty to just collect metrics)", "");
+
+        hotpath::ServeProfileOptions preview_opts;
+        preview_opts.endpoint = *endpoint;
+        preview_opts.engine = engine;
+        preview_opts.duration_seconds = *duration;
+        preview_opts.output = ".hotpath/serve_run";
 
         Args serve_args = {"serve-profile",
                            "--endpoint", *endpoint,
                            "--engine", engine,
-                           "--duration", std::to_string(*duration)};
+                           "--duration", std::to_string(*duration),
+                           "--concurrency", std::to_string(*concurrency)};
         if (traffic.has_value() && !traffic->empty()) {
           serve_args.push_back("--traffic");
           serve_args.push_back(*traffic);
+        }
+        if (auto server_log = hotpath::discover_server_log_path(preview_opts);
+            server_log.has_value()) {
+          std::cerr << "Using auto-discovered vLLM server log: "
+                    << server_log->string() << "\n";
+          serve_args.push_back("--server-log");
+          serve_args.push_back(server_log->string());
         }
         return handle_serve_profile(serve_args);
       }
@@ -3075,7 +3092,7 @@ int main(int argc, char** argv) {
     }
 
     if (command == "version") {
-      std::cout << "hotpath 0.2.5\n";
+      std::cout << "hotpath 0.2.6\n";
       return 0;
     }
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.2.6 - 2026-04-05
+
+serve-profile UX fixes for the local video flow.
+
+Highlights:
+
+- `serve-profile` now auto-discovers a local vLLM debug log under `.hotpath/video-server/` when users do not pass `--server-log`
+- interactive `serve-profile` now prompts for `Concurrency`
+- interactive runs now forward the auto-discovered vLLM log path so queue, prefill, and decode timing work in the common localhost demo setup
+- added a regression test covering local server log autodiscovery
+
 ## v0.2.5 - 2026-04-05
 
 Video demo and local startup fixes.
