@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include <unistd.h>
+
 namespace hotpath {
 namespace {
 
@@ -116,13 +118,39 @@ std::optional<std::int64_t> extract_locked_sm_clock_mhz(
 }
 
 std::string lock_failure_message(const std::string& command) {
-  return "failed to lock GPU clocks with nvidia-smi. Run `" + command +
+  const std::string manual_command =
+      geteuid() == 0 ? command : "sudo " + command;
+  return "failed to lock GPU clocks with nvidia-smi. Run `" + manual_command +
          "` manually (root may be required).";
 }
 
 std::string unlock_failure_message() {
-  return "failed to unlock GPU clocks with nvidia-smi. Run "
-         "`nvidia-smi --reset-gpu-clocks` manually (root may be required).";
+  const std::string manual_command =
+      geteuid() == 0 ? "nvidia-smi --reset-gpu-clocks"
+                     : "sudo nvidia-smi --reset-gpu-clocks";
+  return "failed to unlock GPU clocks with nvidia-smi. Run `" + manual_command +
+         "` manually (root may be required).";
+}
+
+bool command_exists(const std::string& program) {
+  return run_command_status("command -v " + program + " > /dev/null 2>&1") == 0;
+}
+
+bool should_retry_with_sudo() {
+  return geteuid() != 0 &&
+         isatty(STDIN_FILENO) &&
+         (isatty(STDOUT_FILENO) || isatty(STDERR_FILENO)) &&
+         command_exists("sudo");
+}
+
+int run_gpu_clock_command(const std::string& command) {
+  if (run_command_status(command + " > /dev/null 2>&1") == 0) {
+    return 0;
+  }
+  if (!should_retry_with_sudo()) {
+    return 1;
+  }
+  return run_command_status("sudo " + command);
 }
 
 }  // namespace
@@ -202,13 +230,13 @@ void lock_gpu_clocks(std::optional<std::int64_t> freq_mhz) {
   const std::string command = "nvidia-smi --lock-gpu-clocks=" +
                               std::to_string(freq) + "," +
                               std::to_string(freq);
-  if (run_command_status(command + " > /dev/null 2>&1") != 0) {
+  if (run_gpu_clock_command(command) != 0) {
     throw std::runtime_error(lock_failure_message(command));
   }
 }
 
 void unlock_gpu_clocks() {
-  if (run_command_status("nvidia-smi --reset-gpu-clocks > /dev/null 2>&1") != 0) {
+  if (run_gpu_clock_command("nvidia-smi --reset-gpu-clocks") != 0) {
     throw std::runtime_error(unlock_failure_message());
   }
 }

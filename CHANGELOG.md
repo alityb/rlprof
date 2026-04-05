@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.3 - 2026-04-05
+
+Clock-lock privilege escalation fix.
+
+Highlights:
+
+- `hotpath lock-clocks` and `hotpath unlock-clocks` now retry through `sudo` when direct `nvidia-smi` access fails for a non-root interactive user
+- manual fallback messages now suggest the correct `sudo nvidia-smi ...` command when privilege escalation is required
+- keeps the existing direct path for environments where clock locking already works without `sudo`
+
 ## v0.2.2 - 2026-04-05
 
 Release workflow safety rollback.
