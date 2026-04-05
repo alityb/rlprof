@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.2.5 - 2026-04-05
+
+Video demo and local startup fixes.
+
+Highlights:
+
+- added a known-good Qwen3.5 video demo traffic file and runbook under `examples/`
+- added `examples/start_qwen35_video_server.sh` and `examples/stop_qwen35_video_server.sh`
+- demo startup now uses the working local flags for this environment: `--enforce-eager` and `--language-model-only`
+- the example flow now waits for `/health` before telling users the server is ready
+
 ## v0.2.4 - 2026-04-05
 
 README cleanup and install update.
