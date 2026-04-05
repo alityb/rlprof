@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <regex>
 #include <sstream>
@@ -79,6 +80,20 @@ int extract_usage_int(const std::string& json, const std::string& key, int defau
 
 std::string extract_response_id(const std::string& body) {
   return extract_json_string(body, "id");
+}
+
+std::string make_external_request_id(size_t index) {
+  std::ostringstream id;
+  id << "hotpath-req-" << std::setw(6) << std::setfill('0') << (index + 1);
+  return id.str();
+}
+
+std::string expected_openai_request_id(const ReplayRequest& req,
+                                       const std::string& external_request_id) {
+  if (!req.messages_json.empty()) {
+    return "chatcmpl-" + external_request_id;
+  }
+  return "cmpl-" + external_request_id;
 }
 
 // Extract the raw "messages" JSON array from a line (returns empty string if absent)
@@ -343,7 +358,8 @@ std::vector<ReplayResult> replay_traffic(const std::vector<ReplayRequest>& reque
   for (size_t i = 0; i < requests.size(); ++i) {
     const auto& req = requests[i];
     ReplayResult result;
-    result.request_id = "req_" + std::to_string(i);
+    result.external_request_id = make_external_request_id(i);
+    result.request_id = expected_openai_request_id(req, result.external_request_id);
 
     const std::string body = build_request_body(req, config.model);
 
@@ -372,6 +388,7 @@ std::vector<ReplayResult> replay_traffic(const std::vector<ReplayRequest>& reque
     const std::string curl_cmd =
         "curl -sS -N -X POST "
         "-H 'Content-Type: application/json' "
+        "-H 'X-Request-Id: " + result.external_request_id + "' "
         "-d @" + tmp_path + " "
         "-w '\\n__TIMING__:%{time_starttransfer}:%{time_total}' "
         "'" + config.endpoint + api_path + "'";

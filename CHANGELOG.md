@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.2.9 - 2026-04-05
+
+serve-profile timing correlation and startup hardening.
+
+Highlights:
+
+- `serve-profile` now injects stable hotpath request IDs into OpenAI-compatible requests and canonicalizes vLLM v1 internal randomized IDs back to those external IDs, which removes the main source of order-only request matching
+- vLLM log parsing now scopes itself to the current profiling run instead of parsing the entire historical log file, which prevents stale requests from earlier runs from contaminating timing correlation
+- external endpoint validation now waits through a short startup grace window before failing, which makes localhost demo runs less brittle during server warmup
+- the Qwen video server script now starts vLLM with `--enable-log-requests` and refuses to start if port `8000` is already owned by another process, avoiding false “server ready” states caused by stale listeners
+
 ## v0.2.8 - 2026-04-05
 
 serve-profile terminal redraw fix.

@@ -12,6 +12,18 @@ STDOUT_LOG="${STDOUT_LOG:-${LOG_DIR}/vllm.stdout.log}"
 STDERR_LOG="${STDERR_LOG:-${LOG_DIR}/vllm.stderr.log}"
 PYTHON_BIN="${PYTHON_BIN:-.venv/bin/python}"
 
+listener_pid_for_port() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -ti tcp:"${PORT}" -sTCP:LISTEN 2>/dev/null | head -n 1
+    return 0
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp "( sport = :${PORT} )" 2>/dev/null | awk 'NR>1 { if (match($0, /pid=([0-9]+)/, m)) { print m[1]; exit } }'
+    return 0
+  fi
+  return 0
+}
+
 mkdir -p "${LOG_DIR}"
 
 if [[ ! -x "${PYTHON_BIN}" ]]; then
@@ -28,12 +40,20 @@ if [[ -f "${PID_FILE}" ]]; then
   rm -f "${PID_FILE}"
 fi
 
+port_pid="$(listener_pid_for_port || true)"
+if [[ -n "${port_pid}" ]]; then
+  echo "error: port ${PORT} is already in use by pid ${port_pid}" >&2
+  echo "stop the existing server first before starting the demo server" >&2
+  exit 1
+fi
+
 nohup env VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL}" "${PYTHON_BIN}" -c "from vllm.entrypoints.cli.main import main; main()" \
   serve "${MODEL}" \
   --port "${PORT}" \
   --tensor-parallel-size 1 \
   --max-model-len "${MAX_MODEL_LEN}" \
   --gpu-memory-utilization "${GPU_MEM_UTIL}" \
+  --enable-log-requests \
   --enforce-eager \
   --language-model-only \
   > "${STDOUT_LOG}" \
@@ -46,8 +66,10 @@ echo "started server pid ${server_pid}"
 
 for _ in $(seq 1 180); do
   if curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
-    echo "server ready on http://127.0.0.1:${PORT}"
-    exit 0
+    if kill -0 "${server_pid}" 2>/dev/null; then
+      echo "server ready on http://127.0.0.1:${PORT}"
+      exit 0
+    fi
   fi
   if ! kill -0 "${server_pid}" 2>/dev/null; then
     echo "server exited during startup" >&2

@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iomanip>
 #include <iostream>
@@ -292,6 +293,31 @@ std::string background_command(const std::string& command,
   return "(" + command + ") >> " + shell_escape(log_path.string()) + " 2>&1 & echo $!";
 }
 
+std::vector<std::string> read_log_lines_from_offset(
+    const std::filesystem::path& path,
+    std::uintmax_t offset_bytes) {
+  std::ifstream in(path);
+  if (!in.is_open()) {
+    throw std::runtime_error("cannot open log file: " + path.string());
+  }
+  std::error_code ec;
+  const auto size = std::filesystem::file_size(path, ec);
+  if (!ec && offset_bytes > 0 && size >= offset_bytes) {
+    in.seekg(static_cast<std::streamoff>(offset_bytes), std::ios::beg);
+    if (offset_bytes > 0 && in.good()) {
+      std::string partial;
+      std::getline(in, partial);
+    }
+  }
+
+  std::vector<std::string> lines;
+  std::string line;
+  while (std::getline(in, line)) {
+    lines.push_back(line);
+  }
+  return lines;
+}
+
 pid_t start_background_command(const std::string& command,
                                const std::filesystem::path& log_path) {
   const std::string wrapped =
@@ -442,6 +468,19 @@ bool server_ready(const std::string& endpoint) {
   return std::system(command.c_str()) == 0;
 }
 
+bool wait_for_external_endpoint_ready(
+    const std::string& endpoint,
+    std::chrono::seconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (server_ready(endpoint)) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+  }
+  return server_ready(endpoint);
+}
+
 void wait_for_server_ready_or_throw(
     pid_t server_pid,
     const std::string& endpoint,
@@ -571,6 +610,13 @@ std::vector<RequestTrace> results_to_traces(const std::vector<ReplayResult>& res
     t.cached_tokens = 0;
     t.status = r.success ? "ok" : "error";
     t.prompt_text = (i < requests.size()) ? requests[i].prompt : "";
+    if (!r.external_request_id.empty()) {
+      t.events.push_back(RequestEvent{
+          .event_type = "client_request_id",
+          .timestamp_us = r.send_us,
+          .detail = "{\"external_request_id\":\"" + r.external_request_id + "\"}",
+      });
+    }
     traces.push_back(std::move(t));
   }
   return traces;
@@ -1047,16 +1093,15 @@ int run_serve_profile(const ServeProfileOptions& opts) {
   } else {
     // ── Step 4: Validate external endpoint ──
     std::cerr << "Checking " << opts.endpoint << " ...\n";
-    const std::string health_status = run_cmd(
-        "curl -sS -o /dev/null -w '%{http_code}' --max-time 5 '" +
-        opts.endpoint + "/health'");
-    if (health_status != "200") {
+    constexpr auto kExternalEndpointGrace = std::chrono::seconds(20);
+    if (!wait_for_external_endpoint_ready(opts.endpoint, kExternalEndpointGrace)) {
       std::cerr << "error: endpoint " << opts.endpoint << " is not reachable\n";
       std::cerr << "Start your " << opts.engine << " server first:\n";
       if (opts.engine == "sglang") {
         std::cerr << "  python -m sglang.launch_server --model-path <model> --port 8000\n";
       } else {
         std::cerr << "  vllm serve <model> --port 8000\n";
+        std::cerr << "  or ./examples/start_qwen35_video_server.sh\n";
       }
       return 1;
     }
@@ -1082,7 +1127,18 @@ int run_serve_profile(const ServeProfileOptions& opts) {
   if (opts.engine == "vllm" && !server_log_path.has_value()) {
     std::cerr << "Queue wait timing requires access to vLLM server logs.\n";
     std::cerr << "Set VLLM_LOGGING_LEVEL=DEBUG and pass --server-log <path> to enable server-side timing.\n";
-    std::cerr << "Demo note: examples/start_qwen35_video_server.sh writes logs to .hotpath/video-server/vllm.stderr.log.\n";
+    std::cerr << "Demo note: examples/start_qwen35_video_server.sh writes logs to .hotpath/video-server/vllm.stdout.log and .hotpath/video-server/vllm.stderr.log.\n";
+  }
+
+  std::uintmax_t server_log_start_offset = 0;
+  if (opts.engine == "vllm" && server_log_path.has_value()) {
+    std::error_code ec;
+    if (fs::exists(*server_log_path, ec) && !ec) {
+      server_log_start_offset = fs::file_size(*server_log_path, ec);
+      if (ec) {
+        server_log_start_offset = 0;
+      }
+    }
   }
 
   std::optional<fs::path> nsys_sqlite_path;
@@ -1489,7 +1545,9 @@ int run_serve_profile(const ServeProfileOptions& opts) {
   ServerTraceCorrelationResult trace_correlation;
   if (opts.engine == "vllm" && server_log_path.has_value() && fs::exists(*server_log_path)) {
     try {
-      const auto log_parse = parse_vllm_log_details(*server_log_path);
+      const auto log_lines =
+          read_log_lines_from_offset(*server_log_path, server_log_start_offset);
+      const auto log_parse = parse_vllm_log_lines_detailed(log_lines);
       per_request_cache_data_available = std::any_of(
           log_parse.traces.begin(), log_parse.traces.end(), [](const RequestTrace& trace) {
             if (trace.cached_tokens > 0) return true;
@@ -1502,7 +1560,8 @@ int run_serve_profile(const ServeProfileOptions& opts) {
       aggregate_cache_hit_rate = log_parse.aggregate_cache_hit_rate;
       if (!log_parse.traces.empty()) {
         std::cerr << "Parsed " << log_parse.traces.size()
-                  << " server-side request traces from " << server_log_path->string() << "\n";
+                  << " server-side request traces from " << server_log_path->string()
+                  << " (" << log_lines.size() << " new log lines)\n";
       } else if (log_parse.aggregate_cache_hit_rate.has_value()) {
         std::cerr << "Server log: aggregate cache hit rate extracted (no per-request traces "
                   << "— vLLM v1 engine does not log per-request debug lines)\n";
@@ -1526,6 +1585,8 @@ int run_serve_profile(const ServeProfileOptions& opts) {
         if (refine_order_matched_v1_timing(traces, trace_correlation, server_timing_means)) {
           trace_correlation.metric_assisted = true;
         }
+        std::cerr << "  For exact per-request matching on vLLM v1, start the server with "
+                  << "--enable-log-requests so request IDs appear in DEBUG logs.\n";
       } else if (!log_parse.traces.empty() && !traces.empty()) {
         // Only warn with ID details if the IDs looked like real request IDs
         std::cerr

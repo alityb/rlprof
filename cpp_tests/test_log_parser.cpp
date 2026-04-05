@@ -111,6 +111,43 @@ int main() {
   expect_true(std::find(internal_ids.begin(), internal_ids.end(), "7b1d9f4e-req") != internal_ids.end(),
               "missing internal 7b1d9f4e-req id");
 
+  const std::vector<std::string> hotpath_internal_id_lines = {
+      "INFO 04-04 12:10:00.000000 async_llm.py:420 Added request cmpl-hotpath-req-000001-0-deadbeef.",
+      "DEBUG 04-04 12:10:00.005000 scheduler.py:200 Running: [cmpl-hotpath-req-000001-0-deadbeef]",
+      "DEBUG 04-04 12:10:00.010000 model_runner.py:300 prompt processing complete for request cmpl-hotpath-req-000001-0-deadbeef token=64",
+      "INFO 04-04 12:10:00.300000 engine.py:400 Finished request cmpl-hotpath-req-000001-0-deadbeef output_tokens=12",
+      "INFO 04-04 12:10:01.000000 async_llm.py:420 Added request chatcmpl-hotpath-req-000002-feedface.",
+      "DEBUG 04-04 12:10:01.006000 scheduler.py:200 Running: [chatcmpl-hotpath-req-000002-feedface]",
+      "DEBUG 04-04 12:10:01.012000 model_runner.py:300 Prefill done for requests [chatcmpl-hotpath-req-000002-feedface] token=32",
+      "INFO 04-04 12:10:01.200000 engine.py:400 Finished request chatcmpl-hotpath-req-000002-feedface output_tokens=8",
+  };
+  const auto hotpath_internal = hotpath::parse_vllm_log_lines(hotpath_internal_id_lines);
+  expect_true(hotpath_internal.size() == 2,
+              "expected 2 traces from hotpath-injected internal-id logs");
+  std::vector<std::string> hotpath_ids;
+  for (const auto& trace : hotpath_internal) hotpath_ids.push_back(trace.request_id);
+  expect_true(std::find(hotpath_ids.begin(), hotpath_ids.end(), "cmpl-hotpath-req-000001") !=
+                  hotpath_ids.end(),
+              "missing canonical completion request id");
+  expect_true(std::find(hotpath_ids.begin(), hotpath_ids.end(), "chatcmpl-hotpath-req-000002") !=
+                  hotpath_ids.end(),
+              "missing canonical chat request id");
+
+  std::vector<hotpath::RequestTrace> exact_client_traces = {
+      hotpath::RequestTrace{.request_id = "cmpl-hotpath-req-000001", .arrival_us = 1000000},
+      hotpath::RequestTrace{.request_id = "chatcmpl-hotpath-req-000002", .arrival_us = 2000000},
+  };
+  const auto exact_result =
+      hotpath::correlate_server_traces(exact_client_traces, hotpath_internal);
+  expect_true(exact_result.method == hotpath::ServerTraceMatchMethod::ID,
+              "hotpath request IDs should correlate by exact ID");
+  expect_true(exact_result.matched_requests == 2,
+              "exact ID correlation should match both hotpath requests");
+  for (const auto& trace : exact_client_traces) {
+    expect_true(trace.server_timing_available,
+                "exact-ID-correlated client trace should gain server timing");
+  }
+
   std::vector<hotpath::RequestTrace> client_traces;
   std::vector<hotpath::RequestTrace> server_traces;
   for (int i = 0; i < 5; ++i) {

@@ -16,6 +16,7 @@ struct ReplayRequest {
 };
 
 struct ReplayResult {
+    std::string external_request_id;
     std::string request_id;
     int64_t send_us = 0;
     int64_t first_token_us = 0;

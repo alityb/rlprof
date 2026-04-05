@@ -45,6 +45,49 @@ std::string trim(std::string value) {
   return value.substr(start);
 }
 
+std::string clean_request_id_token(std::string token) {
+  token = trim(std::move(token));
+  while (!token.empty() &&
+         (token.back() == ']' || token.back() == ')' || token.back() == '.' ||
+          token.back() == ':' || token.back() == ',')) {
+    token.pop_back();
+  }
+  while (!token.empty() &&
+         (token.front() == '[' || token.front() == '(' || token.front() == '"' ||
+          token.front() == '\'')) {
+    token.erase(token.begin());
+  }
+  return token;
+}
+
+std::string canonicalize_vllm_request_id(const std::string& request_id) {
+  if (request_id.rfind("cmpl-hotpath-req-", 0) == 0) {
+    static const std::regex completion_internal_re(
+        R"(^(cmpl-hotpath-req-\d+)(?:-\d+)?-[0-9a-fA-F]{8}$)");
+    std::smatch match;
+    if (std::regex_match(request_id, match, completion_internal_re)) {
+      return match[1].str();
+    }
+  }
+  if (request_id.rfind("chatcmpl-hotpath-req-", 0) == 0) {
+    static const std::regex chat_internal_re(
+        R"(^(chatcmpl-hotpath-req-\d+)(?:_\d+)?-[0-9a-fA-F]{8}$)");
+    std::smatch match;
+    if (std::regex_match(request_id, match, chat_internal_re)) {
+      return match[1].str();
+    }
+  }
+  if (request_id.rfind("responses-hotpath-req-", 0) == 0) {
+    static const std::regex responses_internal_re(
+        R"(^(responses-hotpath-req-\d+)(?:-\d+)?-[0-9a-fA-F]{8}$)");
+    std::smatch match;
+    if (std::regex_match(request_id, match, responses_internal_re)) {
+      return match[1].str();
+    }
+  }
+  return request_id;
+}
+
 std::vector<std::string> split_ids(std::string text) {
   std::vector<std::string> ids;
   text = trim(std::move(text));
@@ -54,15 +97,7 @@ std::vector<std::string> split_ids(std::string text) {
   std::stringstream ss(text);
   std::string item;
   while (std::getline(ss, item, ',')) {
-    item = trim(std::move(item));
-    while (!item.empty() &&
-           (item.back() == ']' || item.back() == ')' || item.back() == '.' || item.back() == ':')) {
-      item.pop_back();
-    }
-    while (!item.empty() &&
-           (item.front() == '[' || item.front() == '(' || item.front() == '"' || item.front() == '\'')) {
-      item.erase(item.begin());
-    }
+    item = clean_request_id_token(std::move(item));
     if (!item.empty()) {
       ids.push_back(item);
     }
@@ -101,6 +136,10 @@ std::vector<std::string> extract_contextual_request_ids(const std::string& line)
   std::smatch match;
 
   auto filter_ids = [](std::vector<std::string> ids) {
+    for (auto& id : ids) {
+      id = clean_request_id_token(std::move(id));
+      id = canonicalize_vllm_request_id(id);
+    }
     ids.erase(std::remove_if(ids.begin(), ids.end(),
                              [](const std::string& id) { return !looks_like_request_id(id); }),
               ids.end());
