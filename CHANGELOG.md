@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.4 - 2026-04-05
+
+README cleanup and install update.
+
+Highlights:
+
+- README rewritten to be shorter and more direct
+- install instructions now use `uv tool install hotpath`
+- source install example now uses `uv tool install .`
+
 ## v0.2.3 - 2026-04-05
 
 Clock-lock privilege escalation fix.

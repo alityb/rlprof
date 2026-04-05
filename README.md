@@ -1,19 +1,19 @@
 # hotpath
 
-Profiler for LLM inference. Kernel timing, request lifecycle tracing, and disaggregation analysis for vLLM and SGLang.
+Profiler for LLM inference.
+
+hotpath profiles live vLLM and SGLang servers, analyzes request and GPU behavior, and recommends when to split prefill and decode.
 
 ## What it does
 
-**Profile** a live vLLM or SGLang endpoint with real traffic: capture CUDA kernel timing, Prometheus server metrics, and per-request latency breakdowns.
-
-**Analyze** the results: prefill vs decode phase breakdown, KV cache efficiency, prefix sharing patterns, queue depth over time, TTFT and decode-per-token distributions.
-
-**Advise** on disaggregation: an analytical M/G/1 queueing model estimates whether splitting prefill and decode onto separate GPU pools improves throughput. If recommended, hotpath generates ready-to-use deployment configs for vLLM, llm-d, and Dynamo.
+- Profile a live endpoint with real traffic
+- Analyze queueing, prefill, decode, cache, and batching
+- Recommend disaggregation and generate deployment configs
 
 ## Install
 
 ```bash
-pip install hotpath
+uv tool install hotpath
 ```
 
 ## Quick start
@@ -25,23 +25,23 @@ hotpath serve-profile \
   --endpoint http://localhost:8000 \
   --traffic prompts.jsonl \
   --concurrency 4 \
-  --duration 300 \
+  --duration 60 \
   --output .hotpath/run
 ```
 
-View results:
+View the report:
 
 ```bash
 hotpath serve-report .hotpath/run/serve_profile.db
 ```
 
-Generate disaggregation deployment configs:
+Generate deployment configs:
 
 ```bash
 hotpath disagg-config .hotpath/run/serve_profile.db --format all
 ```
 
-For full server-side timing (queue wait, prefill, decode phases), start vLLM with debug logging and pass the log file:
+If you want server-side request timing, start vLLM with debug logs and pass the log file:
 
 ```bash
 VLLM_LOGGING_LEVEL=DEBUG vllm serve <model> 2>vllm.log &
@@ -51,16 +51,19 @@ hotpath serve-profile \
   --traffic prompts.jsonl \
   --server-log vllm.log \
   --concurrency 4 \
-  --duration 300
+  --duration 60
 ```
 
-For kernel-level GPU phase breakdown, add `--nsys`:
+If you want kernel-level GPU traces, add `--nsys`:
 
 ```bash
-hotpath serve-profile --endpoint http://localhost:8000 --traffic prompts.jsonl --nsys
+hotpath serve-profile \
+  --endpoint http://localhost:8000 \
+  --traffic prompts.jsonl \
+  --nsys
 ```
 
-## Traffic file format
+## Traffic format
 
 JSONL, one request per line:
 
@@ -69,16 +72,16 @@ JSONL, one request per line:
 {"prompt": "Write a Python retry decorator with exponential backoff.", "max_tokens": 400}
 ```
 
-ShareGPT format is also accepted.
+ShareGPT format is also supported.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `serve-profile` | Profile a live vLLM/SGLang server with traffic replay |
+| `serve-profile` | Profile a live vLLM or SGLang server |
 | `serve-report` | Print a serving analysis report |
 | `disagg-config` | Generate deployment configs for disaggregated serving |
-| `profile` | GPU kernel profiling under RL-style rollout workloads |
+| `profile` | Run GPU kernel profiling under RL-style traffic |
 | `report` | View a saved kernel profile |
 | `diff` | Compare two kernel profiles |
 | `bench` | Benchmark individual GPU kernel implementations |
@@ -90,8 +93,8 @@ ShareGPT format is also accepted.
 
 - Linux
 - NVIDIA GPU with CUDA driver
-- `nsys` (for kernel profiling; not required for serving analysis)
-- vLLM or SGLang (for serving analysis)
+- `nsys` for kernel profiling
+- vLLM or SGLang for serving analysis
 
 ## Build from source
 
@@ -104,27 +107,20 @@ ctest --test-dir build --output-on-failure
 Install from source:
 
 ```bash
-python3 -m venv .venv && . .venv/bin/activate
-pip install .
+uv tool install .
 ```
 
 Requirements: CMake 3.28+, C++20 compiler, SQLite3.
 
 ## How it works
 
-hotpath is a single C++ binary with no runtime dependencies beyond SQLite3.
+hotpath stores results in SQLite and combines three data sources:
 
-Data is collected from three sources:
+1. Kernel traces from `nsys`
+2. Server metrics from `/metrics`
+3. Request lifecycle timing from client traces and vLLM debug logs
 
-1. **Kernel traces** -- nsys captures GPU kernel execution. hotpath parses the output, categorizes kernels (GEMM, attention, MoE, etc.), and classifies them as prefill or decode phase by timing correlation with server events.
-
-2. **Server metrics** -- Prometheus metrics from vLLM or SGLang `/metrics` endpoints are polled at 1 Hz. Batch size, queue depth, KV cache utilization, and preemption counts are tracked over the profiling window.
-
-3. **Request lifecycle** -- vLLM debug logs are parsed to extract per-request timestamps: arrival, queue wait, prefill start, decode start, completion. These are stored as structured traces and can be exported as OpenTelemetry spans.
-
-The disaggregation advisor uses a simplified M/G/1 queueing model to estimate whether splitting prefill and decode onto separate GPU pools would improve throughput. It searches over P:D ratios and accounts for KV transfer overhead to produce a concrete recommendation with estimated throughput improvement.
-
-All data is stored in SQLite databases for offline analysis and comparison across runs.
+The report turns those signals into latency breakdowns, cache analysis, prefix-sharing analysis, and a disaggregation recommendation.
 
 ## Release notes
 
