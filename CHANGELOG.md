@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.3.4 - 2026-04-06
+
+Rich terminal frontend for serve-report.
+
+Highlights:
+
+- `hotpath serve-report` now renders via a Rich + plotext Python frontend by default, replacing the plain ANSI text output with colored tables, GPU phase bars, and live batch-size charts rendered directly in the terminal
+- the new renderer reads the SQLite database directly from Python — no round-trip through the C++ binary — so the report appears in under 100ms
+- `--format text` escapes back to the original C++ output if needed
+- `rich>=13.0` and `plotext>=5.2` are now core dependencies (both pure-Python, no system deps)
+- if rich/plotext are unavailable the CLI transparently falls back to the C++ renderer with no error
+
 ## v0.3.3 - 2026-04-06
 
 KV cache usage normalization and stronger cache-demo defaults.

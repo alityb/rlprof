@@ -1,0 +1,1093 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>hotpath · serve-report</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #080c0a;
+    --bg1:       #0d1410;
+    --bg2:       #111a15;
+    --bg3:       #172010;
+    --border:    #1e2d22;
+    --border2:   #253326;
+    --dim:       #3a5040;
+    --muted:     #556b5c;
+    --body:      #8aaa90;
+    --text:      #c8dccb;
+    --bright:    #e8f4ea;
+    --green:     #3ddc84;
+    --green-dim: #1f6e40;
+    --green-glow:#3ddc8440;
+    --acid:      #00ff88;
+    --purple:    #c084fc;
+    --purple-dim:#5a2d7a;
+    --amber:     #fbbf24;
+    --amber-dim: #6b4a10;
+    --red:       #f87171;
+    --red-dim:   #5a1d1d;
+    --cyan:      #67e8f9;
+    --cyan-dim:  #0d4a52;
+    --font:      'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+    --r:         3px;
+    --r2:        5px;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html {
+    font-size: 13px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    min-height: 100vh;
+    background:
+      radial-gradient(ellipse 80% 50% at 20% 10%, #0d2616 0%, transparent 60%),
+      radial-gradient(ellipse 60% 40% at 80% 80%, #0a1a22 0%, transparent 60%),
+      var(--bg);
+    padding: 28px 24px 48px;
+  }
+
+  /* ── scanline overlay ── */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      to bottom,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.08) 2px,
+      rgba(0,0,0,0.08) 4px
+    );
+    pointer-events: none;
+    z-index: 1000;
+  }
+
+  .page {
+    max-width: 900px;
+    margin: 0 auto;
+  }
+
+  /* ── HEADER ── */
+  .header {
+    border-bottom: 1px solid var(--border2);
+    padding-bottom: 16px;
+    margin-bottom: 24px;
+    animation: fadein 0.4s ease both;
+  }
+
+  .header-cmd {
+    color: var(--muted);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    margin-bottom: 6px;
+  }
+
+  .header-cmd span { color: var(--body); }
+
+  .header-title {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .wordmark {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--green);
+    letter-spacing: -0.02em;
+    text-shadow: 0 0 20px var(--green-glow), 0 0 40px var(--green-glow);
+  }
+
+  .title-sep { color: var(--dim); font-size: 18px; }
+
+  .title-model {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--bright);
+  }
+
+  .title-meta {
+    display: flex;
+    gap: 16px;
+    margin-top: 8px;
+    flex-wrap: wrap;
+  }
+
+  .badge {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    padding: 2px 7px;
+    border-radius: var(--r);
+    text-transform: uppercase;
+  }
+
+  .badge-engine  { background: var(--bg2); color: var(--body); border: 1px solid var(--border2); }
+  .badge-gpu     { background: #0e1e2a; color: var(--cyan); border: 1px solid var(--cyan-dim); }
+  .badge-flag    { background: var(--bg2); color: var(--muted); border: 1px solid var(--border); }
+
+  /* ── SUMMARY CARDS ── */
+  .summary {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-bottom: 24px;
+    animation: fadein 0.4s 0.05s ease both;
+  }
+
+  .card {
+    background: var(--bg1);
+    border: 1px solid var(--border2);
+    border-radius: var(--r2);
+    padding: 14px 16px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: var(--green);
+    opacity: 0.4;
+  }
+
+  .card-label {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+
+  .card-value {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--bright);
+    letter-spacing: -0.03em;
+    line-height: 1;
+  }
+
+  .card-unit {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
+  /* ── SECTION ── */
+  .section {
+    margin-bottom: 22px;
+    animation: fadein 0.4s ease both;
+  }
+
+  .section-title {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .section-title::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  /* ── LATENCY TABLE ── */
+  .latency-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+
+  .latency-table th {
+    text-align: right;
+    color: var(--dim);
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    font-size: 10px;
+    padding: 4px 10px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .latency-table th:first-child { text-align: left; }
+
+  .latency-table td {
+    padding: 5px 10px;
+    border-bottom: 1px solid var(--border);
+    text-align: right;
+    color: var(--body);
+  }
+
+  .latency-table tr:last-child td { border-bottom: none; }
+
+  .latency-table td:first-child {
+    text-align: left;
+    color: var(--text);
+  }
+
+  .latency-table tr:hover td { background: var(--bg1); }
+
+  .latency-table .p99-warn { color: var(--amber); }
+  .latency-table .p99-crit { color: var(--red); }
+  .latency-table .p50-good { color: var(--green); }
+
+  .row-emphasis td { color: var(--bright) !important; font-weight: 600; }
+  .row-emphasis td:first-child::before {
+    content: '→ ';
+    color: var(--green);
+  }
+
+  /* ── GPU PHASE ── */
+  .phase-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .phase-row {
+    display: grid;
+    grid-template-columns: 110px 44px 1fr;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .phase-label { color: var(--body); font-size: 12px; }
+
+  .phase-pct {
+    text-align: right;
+    font-weight: 600;
+    font-size: 12px;
+  }
+
+  .phase-bar-track {
+    background: var(--bg1);
+    border-radius: 2px;
+    height: 14px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+
+  .phase-bar-fill {
+    height: 100%;
+    border-radius: 1px;
+    transition: width 1.2s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .bar-prefill  { background: linear-gradient(90deg, #7c3aed, #a855f7); box-shadow: 0 0 8px #7c3aed50; }
+  .bar-decode   { background: linear-gradient(90deg, #16a34a, #22c55e); box-shadow: 0 0 8px #16a34a50; }
+  .bar-schedule { background: linear-gradient(90deg, #b45309, #d97706); box-shadow: 0 0 8px #b4530950; }
+  .bar-idle     { background: #2a3a2e; }
+
+  .col-purple { color: var(--purple); }
+  .col-green  { color: var(--green); }
+  .col-amber  { color: var(--amber); }
+  .col-muted  { color: var(--muted); }
+
+  /* ── CHARTS ── */
+  .chart-wrap {
+    background: var(--bg1);
+    border: 1px solid var(--border2);
+    border-radius: var(--r2);
+    padding: 16px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .chart-title {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .chart-unit {
+    font-size: 10px;
+    color: var(--dim);
+  }
+
+  svg.chart {
+    width: 100%;
+    overflow: visible;
+    display: block;
+  }
+
+  .chart-grid-line { stroke: var(--border); stroke-width: 1; }
+  .chart-axis-line { stroke: var(--border2); stroke-width: 1; }
+  .chart-tick-label { fill: var(--muted); font-size: 10px; font-family: var(--font); }
+  .chart-path-throughput {
+    fill: none;
+    stroke: var(--green);
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    filter: drop-shadow(0 0 4px var(--green));
+  }
+  .chart-area-throughput {
+    fill: url(#grad-throughput);
+  }
+  .chart-path-batch {
+    fill: none;
+    stroke: var(--amber);
+    stroke-width: 1.5;
+    stroke-linecap: square;
+    stroke-linejoin: miter;
+    filter: drop-shadow(0 0 4px #d9770640);
+  }
+  .chart-area-batch {
+    fill: url(#grad-batch);
+  }
+
+  .charts-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 22px;
+  }
+
+  /* ── KV + PREFIX ── */
+  .stats-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 22px;
+  }
+
+  .stats-box {
+    background: var(--bg1);
+    border: 1px solid var(--border2);
+    border-radius: var(--r2);
+    padding: 14px 16px;
+  }
+
+  .stats-box-title {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .stat-pair {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+
+  .stat-pair:last-child { border-bottom: none; }
+
+  .stat-key { color: var(--body); }
+
+  .stat-val {
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .stat-val.good  { color: var(--green); }
+  .stat-val.warn  { color: var(--amber); }
+  .stat-val.crit  { color: var(--red); }
+
+  /* ── CACHE HIT DISTRIBUTION ── */
+  .dist-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 4px;
+  }
+
+  .dist-row {
+    display: grid;
+    grid-template-columns: 52px 1fr 80px;
+    align-items: center;
+    gap: 10px;
+    font-size: 11px;
+  }
+
+  .dist-bucket { color: var(--muted); text-align: right; }
+  .dist-count  { color: var(--body); text-align: right; }
+
+  .dist-bar-track {
+    background: var(--bg);
+    border-radius: 2px;
+    height: 12px;
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+
+  .dist-bar-fill {
+    height: 100%;
+    border-radius: 1px;
+    background: linear-gradient(90deg, var(--green-dim), var(--green));
+    transition: width 1.2s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .dist-bar-fill.hi { background: linear-gradient(90deg, #16a34a, #4ade80); }
+
+  /* ── DISAGG ADVISOR ── */
+  .advisor-box {
+    background: var(--bg1);
+    border: 1px solid var(--border2);
+    border-radius: var(--r2);
+    padding: 18px 20px;
+    margin-bottom: 22px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .advisor-box::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, var(--purple), transparent);
+  }
+
+  .advisor-meta {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 24px;
+    margin-bottom: 16px;
+    font-size: 12px;
+  }
+
+  .advisor-meta-line {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .advisor-meta-line:last-child { border-bottom: none; }
+
+  .advisor-meta-key { color: var(--muted); }
+  .advisor-meta-val { color: var(--text); font-weight: 500; }
+
+  .advisor-rec {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: var(--bg);
+    border: 1px solid var(--border2);
+    border-radius: var(--r);
+    margin-bottom: 16px;
+  }
+
+  .rec-prefix {
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    white-space: nowrap;
+  }
+
+  .rec-badge {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 3px 10px;
+    border-radius: var(--r);
+    background: #16a34a20;
+    color: var(--green);
+    border: 1px solid var(--green-dim);
+    box-shadow: 0 0 12px var(--green-glow);
+  }
+
+  .rec-badge.warn {
+    background: #b4530920;
+    color: var(--amber);
+    border-color: var(--amber-dim);
+    box-shadow: 0 0 12px #fbbf2420;
+  }
+
+  .rec-hint {
+    font-size: 11px;
+    color: var(--body);
+    font-style: italic;
+  }
+
+  /* ── PROJECTION TABLE ── */
+  .proj-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+
+  .proj-table th {
+    color: var(--dim);
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    font-size: 10px;
+    padding: 5px 10px;
+    text-align: right;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .proj-table th:first-child { text-align: left; }
+
+  .proj-table td {
+    padding: 6px 10px;
+    text-align: right;
+    border-bottom: 1px solid var(--border);
+    color: var(--body);
+  }
+
+  .proj-table tr:last-child td { border-bottom: none; }
+  .proj-table td:first-child { text-align: left; color: var(--text); }
+
+  .proj-table .improve-pos { color: var(--green); font-weight: 600; }
+  .proj-table .improve-neg { color: var(--red); font-weight: 600; }
+  .proj-table tr:hover td { background: var(--bg2); }
+
+  /* ── ADVISOR NOTES ── */
+  .advisor-notes {
+    margin-top: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .advisor-note {
+    display: flex;
+    gap: 10px;
+    font-size: 11px;
+    color: var(--body);
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .advisor-note:last-child { border-bottom: none; }
+
+  .note-key {
+    color: var(--muted);
+    white-space: nowrap;
+    min-width: 160px;
+  }
+
+  /* ── FOOTER ── */
+  .footer {
+    margin-top: 28px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--dim);
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px;
+    animation: fadein 0.4s 0.3s ease both;
+  }
+
+  .footer span { color: var(--muted); }
+
+  /* ── ANIMATIONS ── */
+  @keyframes fadein {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .section:nth-child(1) { animation-delay: 0.05s; }
+  .section:nth-child(2) { animation-delay: 0.1s; }
+  .section:nth-child(3) { animation-delay: 0.15s; }
+  .section:nth-child(4) { animation-delay: 0.2s; }
+  .charts-row           { animation: fadein 0.4s 0.2s ease both; }
+  .stats-row            { animation: fadein 0.4s 0.22s ease both; }
+  .advisor-box          { animation: fadein 0.4s 0.25s ease both; }
+
+  /* ── RESPONSIVE ── */
+  @media (max-width: 680px) {
+    .summary { grid-template-columns: repeat(2, 1fr); }
+    .charts-row { grid-template-columns: 1fr; }
+    .stats-row  { grid-template-columns: 1fr; }
+    .advisor-meta { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- HEADER -->
+  <header class="header">
+    <div class="header-cmd">$ hotpath serve-report <span>.hotpath/full_smoke/serve_profile.db</span></div>
+    <div class="header-title">
+      <span class="wordmark">hotpath</span>
+      <span class="title-sep">/</span>
+      <span class="title-model">Qwen/Qwen2.5-7B-Instruct · vLLM 0.19.0 · 1x H100 80GB</span>
+    </div>
+    <div class="title-meta">
+      <span class="badge badge-engine">vLLM 0.19.0</span>
+      <span class="badge badge-gpu">H100 80GB</span>
+      <span class="badge badge-flag">server-log</span>
+      <span class="badge badge-flag">prefix-caching</span>
+    </div>
+  </header>
+
+  <!-- SUMMARY CARDS -->
+  <div class="summary">
+    <div class="card">
+      <div class="card-label">Requests</div>
+      <div class="card-value">847</div>
+      <div class="card-unit">completed</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Duration</div>
+      <div class="card-value">60.8</div>
+      <div class="card-unit">seconds</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Throughput</div>
+      <div class="card-value">14.1</div>
+      <div class="card-unit">req/s</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Token Rate</div>
+      <div class="card-value">2,847</div>
+      <div class="card-unit">tok/s</div>
+    </div>
+  </div>
+
+  <!-- LATENCY -->
+  <div class="section">
+    <div class="section-title">Latency</div>
+    <table class="latency-table">
+      <thead>
+        <tr>
+          <th></th>
+          <th>p50</th>
+          <th>p90</th>
+          <th>p99</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Queue wait</td>
+          <td class="p50-good">2.1 ms</td>
+          <td>8.4 ms</td>
+          <td>41.2 ms</td>
+        </tr>
+        <tr>
+          <td>Prefill (server)</td>
+          <td>10.1 ms</td>
+          <td>38.3 ms</td>
+          <td class="p99-warn">98.5 ms</td>
+        </tr>
+        <tr>
+          <td>Decode (server)</td>
+          <td>172.0 ms</td>
+          <td>398.1 ms</td>
+          <td class="p99-crit">842.0 ms</td>
+        </tr>
+        <tr>
+          <td>Decode (per-tok)</td>
+          <td>4.2 ms</td>
+          <td>5.1 ms</td>
+          <td>13.9 ms</td>
+        </tr>
+        <tr class="row-emphasis">
+          <td>End-to-end</td>
+          <td>201.4 ms</td>
+          <td>450.3 ms</td>
+          <td class="p99-crit">983.1 ms</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- GPU PHASE -->
+  <div class="section">
+    <div class="section-title">GPU Phase</div>
+    <div class="phase-grid">
+      <div class="phase-row">
+        <span class="phase-label">Prefill</span>
+        <span class="phase-pct col-purple">31.2%</span>
+        <div class="phase-bar-track">
+          <div class="phase-bar-fill bar-prefill" style="width:0%" data-w="31.2%"></div>
+        </div>
+      </div>
+      <div class="phase-row">
+        <span class="phase-label">Decode</span>
+        <span class="phase-pct col-green">48.1%</span>
+        <div class="phase-bar-track">
+          <div class="phase-bar-fill bar-decode" style="width:0%" data-w="48.1%"></div>
+        </div>
+      </div>
+      <div class="phase-row">
+        <span class="phase-label">Schedule</span>
+        <span class="phase-pct col-amber">8.7%</span>
+        <div class="phase-bar-track">
+          <div class="phase-bar-fill bar-schedule" style="width:0%" data-w="8.7%"></div>
+        </div>
+      </div>
+      <div class="phase-row">
+        <span class="phase-label">Idle</span>
+        <span class="phase-pct col-muted">12.0%</span>
+        <div class="phase-bar-track">
+          <div class="phase-bar-fill bar-idle" style="width:0%" data-w="12.0%"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CHARTS ROW -->
+  <div class="charts-row">
+    <div class="chart-wrap">
+      <div class="chart-title">
+        <span>Throughput</span>
+        <span class="chart-unit">tok/s</span>
+      </div>
+      <svg class="chart" id="chart-throughput" height="110" viewBox="0 0 400 110"></svg>
+    </div>
+    <div class="chart-wrap">
+      <div class="chart-title">
+        <span>Batch Size</span>
+        <span class="chart-unit">requests</span>
+      </div>
+      <svg class="chart" id="chart-batch" height="110" viewBox="0 0 400 110"></svg>
+    </div>
+  </div>
+
+  <!-- KV CACHE + PREFIX SHARING -->
+  <div class="stats-row">
+    <div class="stats-box">
+      <div class="stats-box-title">KV Cache</div>
+      <div class="stat-pair">
+        <span class="stat-key">Hit rate</span>
+        <span class="stat-val warn">41.2%</span>
+      </div>
+      <div class="stat-pair">
+        <span class="stat-key">Avg usage</span>
+        <span class="stat-val">73.2%</span>
+      </div>
+      <div class="stat-pair">
+        <span class="stat-key">Peak usage</span>
+        <span class="stat-val warn">91.4%</span>
+      </div>
+      <div class="stat-pair">
+        <span class="stat-key">Eviction rate</span>
+        <span class="stat-val">12</span>
+      </div>
+      <div style="margin-top:14px;">
+        <div class="stats-box-title" style="margin-bottom:10px;">Cache Hit Distribution</div>
+        <div class="dist-grid">
+          <div class="dist-row">
+            <span class="dist-bucket">0%</span>
+            <div class="dist-bar-track">
+              <div class="dist-bar-fill" style="width:0%" data-w="54%"></div>
+            </div>
+            <span class="dist-count">234 (27.0%)</span>
+          </div>
+          <div class="dist-row">
+            <span class="dist-bucket">1–25%</span>
+            <div class="dist-bar-track">
+              <div class="dist-bar-fill" style="width:0%" data-w="16%"></div>
+            </div>
+            <span class="dist-count">68 (8.0%)</span>
+          </div>
+          <div class="dist-row">
+            <span class="dist-bucket">25–50%</span>
+            <div class="dist-bar-track">
+              <div class="dist-bar-fill" style="width:0%" data-w="29%"></div>
+            </div>
+            <span class="dist-count">127 (15.0%)</span>
+          </div>
+          <div class="dist-row">
+            <span class="dist-bucket">50–75%</span>
+            <div class="dist-bar-track">
+              <div class="dist-bar-fill" style="width:0%" data-w="40%"></div>
+            </div>
+            <span class="dist-count">178 (21.0%)</span>
+          </div>
+          <div class="dist-row">
+            <span class="dist-bucket">75%+</span>
+            <div class="dist-bar-track">
+              <div class="dist-bar-fill hi" style="width:0%" data-w="55%"></div>
+            </div>
+            <span class="dist-count">240 (28.3%)</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stats-box">
+      <div class="stats-box-title">Prefix Sharing</div>
+      <div class="stat-pair">
+        <span class="stat-key">Unique prefixes</span>
+        <span class="stat-val">23</span>
+      </div>
+      <div class="stat-pair">
+        <span class="stat-key">Avg req/prefix</span>
+        <span class="stat-val">36.8</span>
+      </div>
+      <div class="stat-pair">
+        <span class="stat-key">Cacheable tokens</span>
+        <span class="stat-val good">72.1%</span>
+      </div>
+      <div class="stat-pair">
+        <span class="stat-key">Actual hit rate</span>
+        <span class="stat-val warn">41.2%</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- DISAGGREGATION ADVISOR -->
+  <div class="advisor-box">
+    <div class="section-title" style="margin-bottom:14px;">Disaggregation Advisor</div>
+    <div class="advisor-meta">
+      <div class="advisor-meta-line">
+        <span class="advisor-meta-key">Workload class</span>
+        <span class="advisor-meta-val">PREFILL_HEAVY</span>
+      </div>
+      <div class="advisor-meta-line">
+        <span class="advisor-meta-key">Median prompt</span>
+        <span class="advisor-meta-val">2.4K tokens</span>
+      </div>
+      <div class="advisor-meta-line">
+        <span class="advisor-meta-key">Prefill contention</span>
+        <span class="advisor-meta-val" style="color:var(--amber)">adds 34% to p99 decode latency</span>
+      </div>
+      <div class="advisor-meta-line">
+        <span class="advisor-meta-key">Median output</span>
+        <span class="advisor-meta-val">340 tokens</span>
+      </div>
+    </div>
+
+    <div class="advisor-rec">
+      <span class="rec-prefix">Recommendation</span>
+      <span class="rec-badge">+ DISAGGREGATE</span>
+      <span class="rec-hint">prefill contention is the dominant bottleneck at p99</span>
+    </div>
+
+    <table class="proj-table">
+      <thead>
+        <tr>
+          <th></th>
+          <th>Current</th>
+          <th>Projected</th>
+          <th>Improvement</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Throughput (req/s)</td>
+          <td>14.1</td>
+          <td>19.8</td>
+          <td class="improve-pos">+40%</td>
+        </tr>
+        <tr>
+          <td>p99 TTFT (ms)</td>
+          <td>84.5</td>
+          <td>52.3</td>
+          <td class="improve-pos">-42%</td>
+        </tr>
+        <tr>
+          <td>p99 ITL (ms)</td>
+          <td>9.8</td>
+          <td>5.2</td>
+          <td class="improve-pos">-47%</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="advisor-notes">
+      <div class="advisor-note">
+        <span class="note-key">Optimal P/D ratio</span>
+        <span>1:3 &nbsp;(2 prefill, 6 decode)</span>
+      </div>
+      <div class="advisor-note">
+        <span class="note-key">KV transfer overhead</span>
+        <span>1.2 ms/req &nbsp;at 100 Gbps IB</span>
+      </div>
+      <div class="advisor-note">
+        <span class="note-key">Min network bandwidth</span>
+        <span>50 Gbps &nbsp;<span style="color:var(--amber)">(below this, disagg hurts)</span></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- FOOTER -->
+  <footer class="footer">
+    <div>24,095 kernels classified · 847/847 requests matched by ID</div>
+    <div>Run <span>hotpath disagg-config serve_profile.db</span> for vLLM / llm-d / Dynamo config</div>
+  </footer>
+
+</div><!-- /page -->
+
+<script>
+// ── Animate bars on load ──────────────────────────────────────────────
+window.addEventListener('load', () => {
+  setTimeout(() => {
+    document.querySelectorAll('[data-w]').forEach(el => {
+      el.style.width = el.dataset.w;
+    });
+  }, 200);
+});
+
+// ── SVG Chart helpers ────────────────────────────────────────────────
+function buildChart(svgId, data, opts) {
+  const svg = document.getElementById(svgId);
+  const W = 400, H = 110;
+  const pad = { top: 8, right: 8, bottom: 24, left: 40 };
+  const cW = W - pad.left - pad.right;
+  const cH = H - pad.top - pad.bottom;
+
+  const minY = opts.minY !== undefined ? opts.minY : Math.min(...data) * 0.85;
+  const maxY = Math.max(...data) * 1.08;
+  const n = data.length;
+
+  const xScale = i => pad.left + (i / (n - 1)) * cW;
+  const yScale = v => pad.top + cH - ((v - minY) / (maxY - minY)) * cH;
+
+  // defs
+  const defs = svgEl('defs');
+  const gradId = `grad-${svgId}`;
+  const grad = svgEl('linearGradient', { id: gradId, x1:'0', y1:'0', x2:'0', y2:'1' });
+  grad.appendChild(svgEl('stop', { offset:'0%', 'stop-color': opts.color, 'stop-opacity': '0.25' }));
+  grad.appendChild(svgEl('stop', { offset:'100%', 'stop-color': opts.color, 'stop-opacity': '0.02' }));
+  defs.appendChild(grad);
+  svg.appendChild(defs);
+
+  // grid lines
+  const ySteps = 4;
+  for (let i = 0; i <= ySteps; i++) {
+    const v = minY + (maxY - minY) * (i / ySteps);
+    const y = yScale(v);
+    svg.appendChild(svgEl('line', { x1: pad.left, y1: y, x2: pad.left + cW, y2: y, class: 'chart-grid-line' }));
+    const lbl = svgEl('text', { x: pad.left - 5, y: y + 3.5, class: 'chart-tick-label', 'text-anchor': 'end' });
+    lbl.textContent = opts.fmt ? opts.fmt(v) : Math.round(v);
+    svg.appendChild(lbl);
+  }
+
+  // x-axis ticks
+  const xTicks = [0, Math.floor(n/4), Math.floor(n/2), Math.floor(3*n/4), n-1];
+  const dur = 60;
+  xTicks.forEach(i => {
+    const x = xScale(i);
+    const sec = Math.round((i / (n-1)) * dur);
+    const lbl = svgEl('text', { x, y: H - 4, class: 'chart-tick-label', 'text-anchor': 'middle' });
+    lbl.textContent = sec + 's';
+    svg.appendChild(lbl);
+  });
+
+  // axis
+  svg.appendChild(svgEl('line', { x1: pad.left, y1: pad.top, x2: pad.left, y2: pad.top + cH, class: 'chart-axis-line' }));
+  svg.appendChild(svgEl('line', { x1: pad.left, y1: pad.top + cH, x2: pad.left + cW, y2: pad.top + cH, class: 'chart-axis-line' }));
+
+  // area
+  let area = `M ${xScale(0)} ${pad.top + cH}`;
+  if (opts.step) {
+    for (let i = 0; i < n; i++) {
+      area += ` L ${xScale(i)} ${yScale(data[i])}`;
+      if (i < n - 1) area += ` L ${xScale(i + 1)} ${yScale(data[i])}`;
+    }
+  } else {
+    area += ` L ${xScale(0)} ${yScale(data[0])}`;
+    for (let i = 1; i < n; i++) area += ` L ${xScale(i)} ${yScale(data[i])}`;
+  }
+  area += ` L ${xScale(n-1)} ${pad.top + cH} Z`;
+  svg.appendChild(svgEl('path', { d: area, fill: `url(#${gradId})` }));
+
+  // line path
+  let d = '';
+  if (opts.step) {
+    d = `M ${xScale(0)} ${yScale(data[0])}`;
+    for (let i = 1; i < n; i++) {
+      d += ` H ${xScale(i)}`;
+      d += ` V ${yScale(data[i])}`;
+    }
+  } else {
+    d = `M ${xScale(0)} ${yScale(data[0])}`;
+    for (let i = 1; i < n; i++) d += ` L ${xScale(i)} ${yScale(data[i])}`;
+  }
+  const pathEl = svgEl('path', { d, class: `chart-path-${opts.cls}`, style: 'stroke-dasharray:9999;stroke-dashoffset:9999' });
+  svg.appendChild(pathEl);
+
+  // animate draw
+  setTimeout(() => {
+    const len = pathEl.getTotalLength ? pathEl.getTotalLength() : 9999;
+    pathEl.style.strokeDasharray = len;
+    pathEl.style.strokeDashoffset = len;
+    pathEl.style.transition = 'stroke-dashoffset 1.4s cubic-bezier(0.16, 1, 0.3, 1)';
+    pathEl.style.strokeDashoffset = '0';
+  }, 300);
+}
+
+function svgEl(tag, attrs = {}) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  return el;
+}
+
+// ── Generate representative time-series data ──────────────────────────
+function seeded(seed) {
+  let s = seed;
+  return () => { s = (s * 1664525 + 1013904223) & 0xffffffff; return (s >>> 0) / 4294967296; };
+}
+
+function makeThroughput() {
+  const r = seeded(42); const n = 61;
+  const base = [3200,3100,3050,3200,3180,3000,2800,2900,2850,2700,
+                 2750,2600,2700,2650,2500,2600,2550,2400,2500,2450,
+                 2300,2400,2350,2200,2300,2250,2100,2200,2150,2000,
+                 2100,2050,1900,2000,1950,1800,1900,1850,1700,1800,
+                 1750,1600,1700,1650,1500,1600,1550,1400,1500,1450,
+                 1300,1400,1350,1200,1300,1250,1100,1200,1150,1050,1000];
+  return base.map(v => v + (r() - 0.5) * 200);
+}
+
+function makeBatch() {
+  const r = seeded(7); const n = 61;
+  const base = [32,32,28,30,32,30,28,32,30,28,
+                 26,28,30,28,26,28,30,26,28,26,
+                 24,26,24,22,24,22,20,22,20,18,
+                 20,18,16,18,16,14,16,14,12,14,
+                 12,10,12,10,8,10,8,6,8,6,
+                 8,6,4,6,4,2,4,2,2,1,1];
+  return base.map(v => Math.max(1, Math.round(v + (r() - 0.5) * 4)));
+}
+
+buildChart('chart-throughput', makeThroughput(), {
+  color: 'var(--green)',
+  cls: 'throughput',
+  minY: 800,
+  fmt: v => v >= 1000 ? (v/1000).toFixed(1)+'k' : Math.round(v),
+});
+
+buildChart('chart-batch', makeBatch(), {
+  color: 'var(--amber)',
+  cls: 'batch',
+  minY: 0,
+  step: true,
+});
+</script>
+</body>
+</html>
