@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include "hotpath/request_trace.h"
 
@@ -54,6 +55,16 @@ ServerTraceCorrelationResult correlate_server_traces(
 
 std::optional<std::filesystem::path> discover_server_log_path(
     const ServeProfileOptions& opts);
+
+inline double cache_usage_metric_to_percent(std::string_view metric_name, double raw_value) {
+    if (raw_value < 0.0) return raw_value;
+    if (metric_name == "vllm:gpu_cache_usage_perc" ||
+        metric_name == "vllm:kv_cache_usage_perc" ||
+        metric_name == "vllm:cpu_cache_usage_perc") {
+        return raw_value * 100.0;
+    }
+    return raw_value;
+}
 
 int run_serve_profile(const ServeProfileOptions& opts);
 

@@ -1,4 +1,4 @@
-# Qwen3.5 Video Demo
+# Qwen2.5 Video Demo
 
 This is the cleanest demo I would record on the current machine.
 
@@ -7,7 +7,7 @@ This is the cleanest demo I would record on the current machine.
 - It fits the current single-GPU A10G box without making the server setup look fragile.
 - It produces an interesting `serve-report`: queue wait, TTFT, GPU phase breakdown, cache behavior, and prefix sharing should all show up.
 - The prompts are all about ML systems theory, so the model output itself reinforces the exact ideas hotpath is measuring.
-- The prompts still share a long repeated instruction prefix, so the report has something concrete to say about cacheability instead of looking random.
+- The prompts now share a deliberately repeated briefing packet across 20 requests, so prefix caching has a real chance to show up as realized KV cache hits instead of only theoretical cacheability.
 
 ## What to run
 
@@ -36,10 +36,10 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 ```
 
 2. Open the demo script and point out the three choices that matter:
-   - model: `Qwen/Qwen3.5-4B`
-   - bounded context: `--max-model-len 8192`
-   - concurrency: `4`
-   - startup flags: `--enforce-eager` and `--language-model-only`
+   - model: `Qwen/Qwen2.5-3B-Instruct`
+   - bounded context: `--max-model-len 12288`
+   - concurrency: `6`
+   - startup flags: `--enable-prefix-caching`, `--enforce-eager`, and `--language-model-only`
 
 3. Run the script.
 
@@ -59,7 +59,7 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 Use this structure:
 
 1. "We are profiling a live vLLM server, not just benchmarking tokens per second."
-2. "The workload is intentionally shaped around systems-theory questions and repeated prefixes, so both the model outputs and the cache analysis are relevant."
+2. "The workload is intentionally shaped around systems-theory questions and one repeated briefing packet, so both the model outputs and the KV cache analysis are relevant."
 3. "The report separates queue wait, prefill, and decode so you can see whether the latency problem is a traffic problem, a cache problem, or a GPU-compute problem."
 4. "Then hotpath turns that analysis into a deployment recommendation instead of stopping at charts."
 
@@ -70,3 +70,4 @@ Use this structure:
 - Do not enable `--nsys` in the first video. It slows the demo and distracts from the serving story.
 - If the model download is slow, pre-pull it before recording and start from the script already on disk.
 - For this machine and vLLM build, prefer the provided startup script over calling `vllm serve` directly.
+- If you want the cache section to look good on camera, restart with the provided script so the server comes up with `--enable-prefix-caching` and the demo log files under `.hotpath/video-server/`.

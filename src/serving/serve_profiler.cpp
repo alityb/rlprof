@@ -253,10 +253,15 @@ DashSnap fetch_dash_snap(const std::string& endpoint, const std::string& engine)
   } else {
     const double b = parse_prom_metric(body, "vllm:num_requests_running");
     const double q = parse_prom_metric(body, "vllm:num_requests_waiting");
-    const double c = parse_prom_metric(body, "vllm:gpu_cache_usage_perc");
+    const double old_cache = parse_prom_metric(body, "vllm:gpu_cache_usage_perc");
+    const double new_cache = parse_prom_metric(body, "vllm:kv_cache_usage_perc");
     if (b >= 0) snap.batch = b;
     if (q >= 0) snap.queue = q;
-    if (c >= 0) snap.cache = c;
+    if (new_cache >= 0) {
+      snap.cache = cache_usage_metric_to_percent("vllm:kv_cache_usage_perc", new_cache);
+    } else if (old_cache >= 0) {
+      snap.cache = cache_usage_metric_to_percent("vllm:gpu_cache_usage_perc", old_cache);
+    }
   }
   return snap;
 }
@@ -276,7 +281,8 @@ std::vector<MetricSnapshot> samples_to_snapshots(const std::vector<MetricSample>
     else if (s.metric == "vllm:gpu_cache_usage_perc" ||
              s.metric == "vllm:kv_cache_usage_perc" ||  // vLLM 0.19+
              s.metric == "vllm:cpu_cache_usage_perc") {
-      snap.cache_usage = std::max(snap.cache_usage, s.value);
+      snap.cache_usage =
+          std::max(snap.cache_usage, cache_usage_metric_to_percent(s.metric, s.value));
     }
   }
   std::vector<MetricSnapshot> result;
@@ -745,7 +751,7 @@ std::vector<MetricSample> fetch_sglang_metrics_once(const std::string& endpoint)
       .sample_time = sample_time,
       .source = "cluster",
       .metric = "vllm:gpu_cache_usage_perc",
-      .value = metrics.token_usage * 100.0,
+      .value = metrics.token_usage,
   });
   samples.push_back(MetricSample{
       .sample_time = sample_time,

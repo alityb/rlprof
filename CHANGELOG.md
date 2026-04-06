@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.3.3 - 2026-04-06
+
+KV cache usage normalization and stronger cache-demo defaults.
+
+Highlights:
+
+- `serve-profile` and `serve-report` now normalize vLLM cache-usage gauges onto a real percentage scale before analysis, which fixes the misleading `0.0%` KV usage displays on vLLM 0.19+ runs
+- the live serve-profile dashboard now reads `vllm:kv_cache_usage_perc` as well as the legacy `vllm:gpu_cache_usage_perc`, so cache usage is reported consistently during profiling
+- the Qwen video demo now defaults to `Qwen/Qwen2.5-3B-Instruct` with prefix caching enabled, a longer shared prefix, 20 requests, concurrency 6, and `--max-model-len 12288`, which produces real cache hits on this machine
+- live verification against `Qwen/Qwen2.5-3B-Instruct` on `localhost:8000` now reports `Hit rate (aggregate) 91.4%`, `Avg usage 0.3%`, and `Peak usage 0.4%` instead of fake zero usage
+
 ## v0.3.2 - 2026-04-06
 
 vLLM v1 server timing reconstruction fix.

@@ -1,3 +1,4 @@
+#include <cmath>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -26,6 +27,13 @@ void write_text(const std::filesystem::path& path, const std::string& text) {
 
 int main() {
   namespace fs = std::filesystem;
+
+  expect_true(std::abs(hotpath::cache_usage_metric_to_percent("vllm:gpu_cache_usage_perc", 0.723) - 72.3) < 1e-9,
+              "expected legacy vLLM cache usage to normalize to percent");
+  expect_true(std::abs(hotpath::cache_usage_metric_to_percent("vllm:kv_cache_usage_perc", 0.341) - 34.1) < 1e-9,
+              "expected vLLM 0.19 cache usage to normalize to percent");
+  expect_true(std::abs(hotpath::cache_usage_metric_to_percent("other", 4.0) - 4.0) < 1e-9,
+              "non-cache metrics should remain unchanged");
 
   const fs::path previous_cwd = fs::current_path();
   const fs::path temp_root = fs::temp_directory_path() / "hotpath_test_serve_profiler";

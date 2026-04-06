@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL="${MODEL:-Qwen/Qwen3.5-4B}"
+MODEL="${MODEL:-Qwen/Qwen2.5-3B-Instruct}"
 PORT="${PORT:-8000}"
 DURATION="${DURATION:-60}"
-CONCURRENCY="${CONCURRENCY:-4}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+CONCURRENCY="${CONCURRENCY:-6}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-12288}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"
 OUT_DIR="${OUT_DIR:-.hotpath/qwen35-video}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-.hotpath/qwen35-video-artifacts}"
@@ -36,7 +36,7 @@ hotpath serve-profile \
   --traffic "${TRAFFIC_FILE}" \
   --concurrency "${CONCURRENCY}" \
   --duration "${DURATION}" \
-  --server-log "${ARTIFACT_DIR}/vllm.stderr.log" \
+  --server-log "${ARTIFACT_DIR}/vllm.stdout.log" \
   --output "${OUT_DIR}"
 
 echo

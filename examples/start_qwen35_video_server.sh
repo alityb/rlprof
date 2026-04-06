@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL="${MODEL:-Qwen/Qwen3.5-4B}"
+MODEL="${MODEL:-Qwen/Qwen2.5-3B-Instruct}"
 PORT="${PORT:-8000}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-12288}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"
 VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-DEBUG}"
 LOG_DIR="${LOG_DIR:-.hotpath/video-server}"
@@ -53,6 +53,7 @@ nohup env VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL}" "${PYTHON_BIN}" -c "from vl
   --tensor-parallel-size 1 \
   --max-model-len "${MAX_MODEL_LEN}" \
   --gpu-memory-utilization "${GPU_MEM_UTIL}" \
+  --enable-prefix-caching \
   --enable-log-requests \
   --enforce-eager \
   --language-model-only \
