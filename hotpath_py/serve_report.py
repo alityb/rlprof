@@ -253,24 +253,14 @@ def render(db_path: str) -> int:
         con.print(pt)
 
     # ── charts ────────────────────────────────────────────────────────────────
-    tput_s  = _ts(db_path, "generation_throughput")
-    batch_s = _ts(db_path, "num_requests_running")
-    if tput_s or batch_s:
+    tput_s = _ts(db_path, "generation_throughput")
+    if tput_s:
         con.rule(style=DM)
-        CW = 38
-        tc = _chart([r[0] for r in tput_s],  [r[1] for r in tput_s],
-                    "green",  w=CW, h=8) if tput_s  else None
-        bc = _chart([r[0] for r in batch_s], [r[1] for r in batch_s],
-                    "cyan", step=True, w=CW, h=8) if batch_s else None
-        panels = []
-        if tc: panels.append(Panel(Text.from_ansi(tc.rstrip()),
-                                   title="[color(241)]throughput tok/s[/]",
-                                   border_style=DM, title_align="left", padding=(0, 0)))
-        if bc: panels.append(Panel(Text.from_ansi(bc.rstrip()),
-                                   title="[color(241)]batch size[/]",
-                                   border_style=DM, title_align="left", padding=(0, 0)))
-        if panels:
-            con.print(Columns(panels, equal=True))
+        tc = _chart([r[0] for r in tput_s], [r[1] for r in tput_s],
+                    "green", w=60, h=8)
+        con.print(Panel(Text.from_ansi(tc.rstrip()),
+                        title="[color(241)]throughput tok/s[/]",
+                        border_style=DM, title_align="left", padding=(0, 0)))
 
     # ── KV cache + prefix sharing ─────────────────────────────────────────────
     con.rule(style=DM)

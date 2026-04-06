@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.3.8 - 2026-04-06
+
+Remove batch size graph from serve-report.
+
 ## v0.3.7 - 2026-04-06
 
 Readability polish for serve-report and serve-profile dashboard.
