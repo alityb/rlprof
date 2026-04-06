@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.3.6 - 2026-04-06
+
+Compact serve-report layout.
+
+Highlights:
+
+- `serve-report` output reduced from ~59 lines to ~31 — fits in a standard 80×40 terminal without scrolling
+- single-line header, inline summary stats, dense latency table, shorter charts (8 lines), all stats in 2-column grids, 1-line footer
+- advisor note truncated to first sentence to avoid multi-line wrapping
+
 ## v0.3.5 - 2026-04-06
 
 Wire Rich frontend through C++ binary.
