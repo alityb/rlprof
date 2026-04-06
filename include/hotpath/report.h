@@ -61,13 +61,13 @@ struct ServeReportData {
   bool server_timing_metric_assisted = false;
   // Latency percentiles (ms)
   double server_ttft_mean_ms = -1.0;  // from Prometheus histogram; -1 = not available
-  double queue_p50 = 0, queue_p90 = 0, queue_p99 = 0;
-  double server_prefill_p50 = 0, server_prefill_p90 = 0, server_prefill_p99 = 0;
-  double server_decode_p50 = 0, server_decode_p90 = 0, server_decode_p99 = 0;
-  double prefill_p50 = 0, prefill_p90 = 0, prefill_p99 = 0;
-  double decode_total_p50 = 0, decode_total_p90 = 0, decode_total_p99 = 0;
-  double decode_per_token_p50 = 0, decode_per_token_p90 = 0, decode_per_token_p99 = 0;
-  double e2e_p50 = 0, e2e_p90 = 0, e2e_p99 = 0;
+  double queue_p50 = -1.0, queue_p90 = -1.0, queue_p99 = -1.0;
+  double server_prefill_p50 = -1.0, server_prefill_p90 = -1.0, server_prefill_p99 = -1.0;
+  double server_decode_p50 = -1.0, server_decode_p90 = -1.0, server_decode_p99 = -1.0;
+  double prefill_p50 = -1.0, prefill_p90 = -1.0, prefill_p99 = -1.0;
+  double decode_total_p50 = -1.0, decode_total_p90 = -1.0, decode_total_p99 = -1.0;
+  double decode_per_token_p50 = -1.0, decode_per_token_p90 = -1.0, decode_per_token_p99 = -1.0;
+  double e2e_p50 = -1.0, e2e_p90 = -1.0, e2e_p99 = -1.0;
   // GPU phase breakdown
   bool gpu_phase_available = false;
   double prefill_compute_pct = 0, decode_compute_pct = 0, other_idle_pct = 0;

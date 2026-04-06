@@ -2361,43 +2361,39 @@ void test_serve_report_extra() {
     auto report = hotpath::render_serve_report(d);
     check(contains(report, "88ms (est.)"), "no server timing: mono side labeled (est.)");
     check(contains(report, "55ms (est.)"), "no server timing: disagg side labeled (est.)");
-    check(!contains(report, "(measured)"), "no server timing: no (measured) label");
+    check(!contains(report, "(measured client)"), "no server timing: no measured-client label");
   }
 
-  section("Serve Report — TTFT label: (measured) when server_prefill_p99 available");
+  section("Serve Report — TTFT label: (measured client) when client TTFT p99 available");
   {
     hotpath::ServeReportData d{};
     d.model_name = "m"; d.engine = "e"; d.gpu_info = "g";
     d.should_disaggregate = true;
     d.optimal_p = 1; d.optimal_d = 3;
-    d.server_timing_available = true;
-    d.server_prefill_p99 = 112.0;  // actual measured server prefill p99
+    d.prefill_p99 = 112.0;         // actual measured client TTFT p99
     d.mono_p99_ttft = 88.0;        // model estimate (should NOT appear for mono)
     d.disagg_p99_ttft = 55.0;
     d.min_bandwidth_gbps = 50.0;
     auto report = hotpath::render_serve_report(d);
-    check(contains(report, "112ms (measured)"), "server_prefill_p99 used as measured mono baseline");
+    check(contains(report, "112ms (measured client)"), "client TTFT p99 used as measured mono baseline");
     check(!contains(report, "88ms"), "model estimate not shown when measured available");
     check(contains(report, "55ms (est.)"), "disagg side always (est.)");
   }
 
-  section("Serve Report — TTFT label: server_timing_available but prefill_p99=0 → (est.)");
+  section("Serve Report — TTFT label: no client TTFT p99 available → (est.)");
   {
-    // server_timing_available=true but server_prefill_p99=0 (e.g. no prefill events in log)
-    // → should fall back to model estimate
     hotpath::ServeReportData d{};
     d.model_name = "m"; d.engine = "e"; d.gpu_info = "g";
     d.should_disaggregate = true;
     d.optimal_p = 2; d.optimal_d = 6;
-    d.server_timing_available = true;
-    d.server_prefill_p99 = 0.0;  // no prefill data
+    d.prefill_p99 = -1.0;  // no client TTFT data
     d.mono_p99_ttft = 70.0;
     d.disagg_p99_ttft = 45.0;
     d.min_bandwidth_gbps = 50.0;
     auto report = hotpath::render_serve_report(d);
     check(contains(report, "70ms (est.)"),
-          "server_prefill_p99=0 → model estimate labeled (est.)");
-    check(!contains(report, "(measured)"), "no (measured) when server_prefill_p99=0");
+          "missing client TTFT → model estimate labeled (est.)");
+    check(!contains(report, "(measured client)"), "no measured-client label without client TTFT");
   }
 
   section("Serve Report — TTFT does not appear when should_disaggregate=false");
@@ -2408,7 +2404,7 @@ void test_serve_report_extra() {
     d.mono_p99_ttft = 50.0; d.disagg_p99_ttft = 30.0;
     auto report = hotpath::render_serve_report(d);
     check(!contains(report, "(est.)"), "MONOLITHIC: no TTFT estimates shown");
-    check(!contains(report, "(measured)"), "MONOLITHIC: no measured label");
+    check(!contains(report, "(measured client)"), "MONOLITHIC: no measured-client label");
     check(contains(report, "MONOLITHIC"), "shows MONOLITHIC recommendation");
   }
 

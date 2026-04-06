@@ -24,6 +24,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <sys/ioctl.h>
 #include <unistd.h>
 
 #include "hotpath/batch_analyzer.h"
@@ -163,14 +164,29 @@ ServerTimingMeans derive_server_timing_means(
 
 // ── Live dashboard helpers ────────────────────────────────────────────────────
 
+bool dash_use_control() {
+  if (!isatty(STDERR_FILENO)) return false;
+  const char* term = std::getenv("TERM");
+  if (term != nullptr && std::string(term) == "dumb") return false;
+  return true;
+}
+
 // Returns true when stderr is an interactive terminal with color support.
-bool dash_use_ansi() {
+bool dash_use_color() {
   if (!isatty(STDERR_FILENO)) return false;
   const char* nc = std::getenv("NO_COLOR");
   if (nc != nullptr) return false;
   const char* term = std::getenv("TERM");
   if (term != nullptr && std::string(term) == "dumb") return false;
   return true;
+}
+
+int dash_terminal_columns() {
+  struct winsize ws {};
+  if (ioctl(STDERR_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
+    return ws.ws_col;
+  }
+  return 80;
 }
 
 // Renders a progress bar: `fill` out of `total` using block characters.
@@ -382,6 +398,169 @@ bool endpoint_is_local(const std::string& endpoint) {
   }
   return hosts_equivalent(parts->host, "127.0.0.1") ||
          hosts_equivalent(parts->host, "::1");
+}
+
+std::int64_t listening_pid_for_port(std::int64_t port);
+
+std::int64_t listener_pid_for_endpoint(const std::string& endpoint) {
+  if (const char* override_pid = std::getenv("HOTPATH_TEST_LISTENER_PID")) {
+    try {
+      return std::stoll(override_pid);
+    } catch (...) {
+      return 0;
+    }
+  }
+  const auto parts = parse_endpoint(endpoint);
+  if (!parts.has_value()) {
+    return 0;
+  }
+  return listening_pid_for_port(parts->port);
+}
+
+std::optional<std::filesystem::path> listener_fd_regular_file(
+    std::int64_t pid,
+    int fd_num) {
+  namespace fs = std::filesystem;
+  const char* override = nullptr;
+  if (fd_num == 1) {
+    override = std::getenv("HOTPATH_TEST_STDOUT_LOG_PATH");
+  } else if (fd_num == 2) {
+    override = std::getenv("HOTPATH_TEST_STDERR_LOG_PATH");
+  }
+  if (override != nullptr && std::string(override).size() > 0) {
+    fs::path path(override);
+    std::error_code ec;
+    return fs::is_regular_file(path, ec) && !ec ? std::optional<fs::path>(path) : std::nullopt;
+  }
+
+  if (pid <= 0) {
+    return std::nullopt;
+  }
+
+  const fs::path fd_path =
+      fs::path("/proc") / std::to_string(static_cast<long long>(pid)) / "fd" /
+      std::to_string(fd_num);
+  std::error_code ec;
+  if (!fs::exists(fd_path, ec) || ec) {
+    return std::nullopt;
+  }
+
+  fs::path target = fs::read_symlink(fd_path, ec);
+  if (ec) {
+    return std::nullopt;
+  }
+
+  std::string target_text = target.string();
+  const std::string deleted_suffix = " (deleted)";
+  if (target_text.size() > deleted_suffix.size() &&
+      target_text.compare(target_text.size() - deleted_suffix.size(),
+                          deleted_suffix.size(),
+                          deleted_suffix) == 0) {
+    target_text.erase(target_text.size() - deleted_suffix.size());
+    target = fs::path(target_text);
+  }
+
+  if (!target.is_absolute()) {
+    return std::nullopt;
+  }
+  return fs::is_regular_file(target, ec) && !ec ? std::optional<fs::path>(target)
+                                                : std::nullopt;
+}
+
+std::string listener_fd_target_description(std::int64_t pid, int fd_num) {
+  namespace fs = std::filesystem;
+  if (pid <= 0) {
+    return "";
+  }
+  const fs::path fd_path =
+      fs::path("/proc") / std::to_string(static_cast<long long>(pid)) / "fd" /
+      std::to_string(fd_num);
+  std::error_code ec;
+  if (!fs::exists(fd_path, ec) || ec) {
+    return "";
+  }
+  const fs::path target = fs::read_symlink(fd_path, ec);
+  return ec ? std::string() : target.string();
+}
+
+std::optional<std::string> process_env_value(
+    std::int64_t pid,
+    const std::string& key) {
+  if (key == "VLLM_LOGGING_LEVEL") {
+    if (const char* override = std::getenv("HOTPATH_TEST_VLLM_LOGGING_LEVEL")) {
+      return std::string(override);
+    }
+  }
+
+  if (pid <= 0) {
+    return std::nullopt;
+  }
+
+  const std::filesystem::path environ_path =
+      std::filesystem::path("/proc") /
+      std::to_string(static_cast<long long>(pid)) / "environ";
+  std::ifstream in(environ_path, std::ios::binary);
+  if (!in.is_open()) {
+    return std::nullopt;
+  }
+  std::string blob((std::istreambuf_iterator<char>(in)),
+                   std::istreambuf_iterator<char>());
+  std::size_t start = 0;
+  while (start < blob.size()) {
+    const std::size_t end = blob.find('\0', start);
+    const std::string entry = blob.substr(start, end - start);
+    const std::size_t split = entry.find('=');
+    if (split != std::string::npos && entry.substr(0, split) == key) {
+      return entry.substr(split + 1);
+    }
+    if (end == std::string::npos) {
+      break;
+    }
+    start = end + 1;
+  }
+  return std::nullopt;
+}
+
+struct ListenerLogInfo {
+  std::int64_t pid = 0;
+  std::optional<std::filesystem::path> stdout_path;
+  std::optional<std::filesystem::path> stderr_path;
+  std::string stdout_target;
+  std::string stderr_target;
+  std::optional<std::string> vllm_logging_level;
+};
+
+ListenerLogInfo inspect_listener_logs_for_endpoint(const std::string& endpoint) {
+  ListenerLogInfo info;
+  info.pid = listener_pid_for_endpoint(endpoint);
+  if (info.pid <= 0) {
+    return info;
+  }
+  info.stdout_path = listener_fd_regular_file(info.pid, 1);
+  info.stderr_path = listener_fd_regular_file(info.pid, 2);
+  info.stdout_target = listener_fd_target_description(info.pid, 1);
+  info.stderr_target = listener_fd_target_description(info.pid, 2);
+  info.vllm_logging_level = process_env_value(info.pid, "VLLM_LOGGING_LEVEL");
+  return info;
+}
+
+std::optional<std::int64_t> extract_apiserver_pid_from_log(
+    const std::filesystem::path& path) {
+  std::ifstream in(path);
+  if (!in.is_open()) {
+    return std::nullopt;
+  }
+
+  static const std::regex apiserver_pid_re(R"(\(APIServer pid=([0-9]+)\))");
+  std::optional<std::int64_t> pid;
+  std::string line;
+  while (std::getline(in, line)) {
+    std::smatch match;
+    if (std::regex_search(line, match, apiserver_pid_re)) {
+      pid = std::stoll(match[1].str());
+    }
+  }
+  return pid;
 }
 
 std::optional<profiler::ManagedServerState> managed_server_for_endpoint(
@@ -705,7 +884,8 @@ bool refine_order_matched_v1_timing(
     std::vector<RequestTrace>& traces,
     const ServerTraceCorrelationResult& trace_correlation,
     const ServerTimingMeans& means) {
-  if (trace_correlation.method != ServerTraceMatchMethod::ORDER) {
+  if (trace_correlation.method != ServerTraceMatchMethod::ORDER &&
+      trace_correlation.method != ServerTraceMatchMethod::ID) {
     return false;
   }
 
@@ -737,7 +917,19 @@ bool refine_order_matched_v1_timing(
 
   bool refined_any = false;
   for (auto& trace : traces) {
-    if (!trace.server_timing_available || trace.arrival_us <= 0) {
+    const bool second_quantized =
+        trace.queue_start_us > 0 &&
+        trace.prefill_start_us > 0 &&
+        trace.prefill_end_us > 0 &&
+        trace.queue_start_us % 1000000 == 0 &&
+        trace.prefill_start_us % 1000000 == 0 &&
+        trace.prefill_end_us % 1000000 == 0 &&
+        (trace.server_last_token_us <= 0 || trace.server_last_token_us % 1000000 == 0);
+    const bool should_refine =
+        trace.server_timing_available &&
+        trace.arrival_us > 0 &&
+        (trace_correlation.method == ServerTraceMatchMethod::ORDER || second_quantized);
+    if (!should_refine) {
       continue;
     }
 
@@ -943,6 +1135,19 @@ std::optional<std::filesystem::path> discover_server_log_path(
     return std::nullopt;
   }
 
+  const ListenerLogInfo listener_log_info = inspect_listener_logs_for_endpoint(opts.endpoint);
+  if (listener_log_info.pid > 0) {
+    if (listener_log_info.stdout_path.has_value()) {
+      return listener_log_info.stdout_path;
+    }
+    if (listener_log_info.stderr_path.has_value()) {
+      return listener_log_info.stderr_path;
+    }
+    // We resolved the live listener, and it does not write stdout/stderr to a
+    // regular file. Avoid guessing nearby stale files from previous runs.
+    return std::nullopt;
+  }
+
   const fs::path output_dir =
       opts.output.empty() ? fs::path(".hotpath/serve_run") : fs::path(opts.output);
   const fs::path output_parent =
@@ -1114,6 +1319,7 @@ int run_serve_profile(const ServeProfileOptions& opts) {
   }
   if (model.empty()) model = "unknown";
   std::cerr << "Model: " << model << "\n";
+  const ListenerLogInfo listener_log_info = inspect_listener_logs_for_endpoint(profile_endpoint);
 
   std::optional<fs::path> server_log_path;
   if (!opts.server_log_path.empty()) {
@@ -1128,6 +1334,47 @@ int run_serve_profile(const ServeProfileOptions& opts) {
     std::cerr << "Queue wait timing requires access to vLLM server logs.\n";
     std::cerr << "Set VLLM_LOGGING_LEVEL=DEBUG and pass --server-log <path> to enable server-side timing.\n";
     std::cerr << "Demo note: examples/start_qwen35_video_server.sh writes logs to .hotpath/video-server/vllm.stdout.log and .hotpath/video-server/vllm.stderr.log.\n";
+    if (listener_log_info.pid > 0) {
+      const bool file_backed =
+          listener_log_info.stdout_path.has_value() || listener_log_info.stderr_path.has_value();
+      if (!file_backed) {
+        std::cerr << "Local vLLM listener PID " << listener_log_info.pid
+                  << " is not writing stdout/stderr to a regular file.\n";
+        if (!listener_log_info.stdout_target.empty()) {
+          std::cerr << "  stdout -> " << listener_log_info.stdout_target << "\n";
+        }
+        if (!listener_log_info.stderr_target.empty() &&
+            listener_log_info.stderr_target != listener_log_info.stdout_target) {
+          std::cerr << "  stderr -> " << listener_log_info.stderr_target << "\n";
+        }
+      }
+      if (listener_log_info.vllm_logging_level.has_value()) {
+        std::string level = *listener_log_info.vllm_logging_level;
+        std::transform(level.begin(), level.end(), level.begin(),
+                       [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+        if (level != "DEBUG") {
+          std::cerr << "VLLM_LOGGING_LEVEL for listener PID " << listener_log_info.pid
+                    << " is " << *listener_log_info.vllm_logging_level
+                    << "; per-request DEBUG timing lines will not be emitted.\n";
+        }
+      } else if (listener_log_info.pid > 0) {
+        std::cerr << "VLLM_LOGGING_LEVEL is not set for listener PID "
+                  << listener_log_info.pid
+                  << "; per-request DEBUG timing lines may be unavailable.\n";
+      }
+    }
+  } else if (opts.engine == "vllm" &&
+             listener_log_info.pid > 0 &&
+             listener_log_info.vllm_logging_level.has_value()) {
+    std::string level = *listener_log_info.vllm_logging_level;
+    std::transform(level.begin(), level.end(), level.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+    if (level != "DEBUG") {
+      std::cerr << "warning: listener PID " << listener_log_info.pid
+                << " writes logs to " << server_log_path->string()
+                << " but VLLM_LOGGING_LEVEL=" << *listener_log_info.vllm_logging_level
+                << ", so per-request DEBUG timing may still be unavailable.\n";
+    }
   }
 
   std::uintmax_t server_log_start_offset = 0;
@@ -1296,7 +1543,8 @@ int run_serve_profile(const ServeProfileOptions& opts) {
   std::atomic<int> dash_done{0}, dash_ok{0}, dash_fail{0};
   const int total_reqs = static_cast<int>(requests.size());
   const double dash_start = now_seconds();
-  const bool use_ansi = dash_use_ansi();
+  const bool use_control = dash_use_control();
+  const bool use_color = dash_use_color();
 
   // Server metrics polled by the dashboard thread for display (never stored).
   std::mutex snap_mtx;
@@ -1317,15 +1565,19 @@ int run_serve_profile(const ServeProfileOptions& opts) {
     { std::lock_guard<std::mutex> lg(snap_mtx); snap = dash_snap; }
 
     int lines_written = 0;
-    if (use_ansi && dash_rendered_lines > 0) {
-      std::cerr << "\033[" << dash_rendered_lines << "A\r\033[J";
+    if (use_control && dash_rendered_lines > 0) {
+      std::cerr << "\033[" << dash_rendered_lines << "F\033[J";
     }
+
+    const int term_cols = dash_terminal_columns();
+    const int time_bar_width = std::clamp(term_cols - 26, 8, 30);
+    const int request_bar_width = std::clamp(term_cols - 42, 8, 30);
 
     // Helper: print a line, erasing trailing content if ANSI is available.
     auto ln = [&](const std::string& s) {
-      if (use_ansi) std::cerr << "\r";
+      if (use_control) std::cerr << "\r";
       std::cerr << s;
-      if (use_ansi) std::cerr << "\033[K";
+      if (use_control) std::cerr << "\033[K";
       std::cerr << "\n";
       ++lines_written;
     };
@@ -1334,13 +1586,13 @@ int run_serve_profile(const ServeProfileOptions& opts) {
     {
       std::ostringstream h;
       h << "  ";
-      if (use_ansi) h << "\033[1m\033[36m";
+      if (use_color) h << "\033[1m\033[36m";
       h << "serve-profile";
-      if (use_ansi) h << "\033[0m";
+      if (use_color) h << "\033[0m";
       if (!model.empty()) {
-        if (use_ansi) h << "  \033[2m"; else h << "  ·  ";
+        if (use_color) h << "  \033[2m"; else h << "  ·  ";
         h << model;
-        if (use_ansi) h << "\033[0m";
+        if (use_color) h << "\033[0m";
       }
       ln(h.str());
     }
@@ -1348,34 +1600,36 @@ int run_serve_profile(const ServeProfileOptions& opts) {
     // ── time bar ─────────────────────────────────────────────────────────────
     {
       std::ostringstream s;
-      s << "  time      " << prog_bar(elapsed_s, opts.duration_seconds);
+      const int shown_elapsed_s =
+          opts.duration_seconds > 0 ? std::min(elapsed_s, opts.duration_seconds) : elapsed_s;
+      s << "  time      " << prog_bar(shown_elapsed_s, opts.duration_seconds, time_bar_width);
       s << "  ";
-      if (use_ansi) s << "\033[2m";
-      s << elapsed_s << "s";
+      if (use_color) s << "\033[2m";
+      s << shown_elapsed_s << "s";
       if (opts.duration_seconds > 0) s << " / " << opts.duration_seconds << "s";
-      if (use_ansi) s << "\033[0m";
+      if (use_color) s << "\033[0m";
       ln(s.str());
     }
 
     // ── request bar (only shown when replaying traffic) ───────────────────────
     if (total_reqs > 0) {
       std::ostringstream s;
-      s << "  requests  " << prog_bar(done, total_reqs);
+      s << "  requests  " << prog_bar(done, total_reqs, request_bar_width);
       s << "  " << done << " / " << total_reqs;
       if (ok > 0) {
-        if (use_ansi) s << "  \033[32m"; else s << "  ok:";
+        if (use_color) s << "  \033[32m"; else s << "  ok:";
         s << "\xe2\x9c\x93" << ok;  // ✓
-        if (use_ansi) s << "\033[0m";
+        if (use_color) s << "\033[0m";
       }
       if (fail > 0) {
-        if (use_ansi) s << "  \033[31m"; else s << "  fail:";
+        if (use_color) s << "  \033[31m"; else s << "  fail:";
         s << "\xe2\x9c\x97" << fail;  // ✗
-        if (use_ansi) s << "\033[0m";
+        if (use_color) s << "\033[0m";
       }
       if (rate > 0.0) {
-        if (use_ansi) s << "  \033[2m"; else s << "  ";
+        if (use_color) s << "  \033[2m"; else s << "  ";
         s << std::fixed << std::setprecision(2) << rate << " req/s";
-        if (use_ansi) s << "\033[0m";
+        if (use_color) s << "\033[0m";
       }
       ln(s.str());
     }
@@ -1392,7 +1646,7 @@ int run_serve_profile(const ServeProfileOptions& opts) {
       }
       ln(s.str());
     } else {
-      if (use_ansi)
+      if (use_color)
         ln("  server    \033[2mconnecting...\033[0m");
       else
         ln("  server    connecting...");
@@ -1429,9 +1683,8 @@ int run_serve_profile(const ServeProfileOptions& opts) {
     rc.endpoint = profile_endpoint;
     rc.model = model;
     rc.max_concurrency = opts.max_concurrency;
-    rc.rate_limit_rps = opts.duration_seconds > 0
-        ? static_cast<double>(requests.size()) / opts.duration_seconds
-        : static_cast<double>(requests.size());
+    rc.max_duration_seconds = opts.duration_seconds;
+    rc.rate_limit_rps = 0.0;
     rc.on_request_done = [&](int d, int /*total*/, int o, int f) {
       dash_done.store(d, std::memory_order_relaxed);
       dash_ok.store(o, std::memory_order_relaxed);
@@ -1450,16 +1703,18 @@ int run_serve_profile(const ServeProfileOptions& opts) {
   stop_dash.store(true);
   metrics_thread.join();
   dash_thread.join();
+  const double profile_duration_seconds =
+      std::max(0.001, now_seconds() - dash_start);
 
   // Clear the dashboard and print a compact final summary.
-  if (use_ansi && dash_rendered_lines > 0)
-    std::cerr << "\033[" << dash_rendered_lines << "A\r\033[J";
+  if (use_control && dash_rendered_lines > 0)
+    std::cerr << "\033[" << dash_rendered_lines << "F\033[J";
   {
-    const int elapsed_s = static_cast<int>(now_seconds() - dash_start);
+    const int elapsed_s = static_cast<int>(profile_duration_seconds);
     const int done = dash_done.load(), ok = dash_ok.load(), fail = dash_fail.load();
     std::ostringstream s;
     s << "  ";
-    if (use_ansi) s << "\033[32m\xe2\x9c\x93\033[0m "; else s << "done: ";  // ✓
+    if (use_color) s << "\033[32m\xe2\x9c\x93\033[0m "; else s << "done: ";  // ✓
     s << "serve-profile";
     if (!model.empty()) s << "  \xc2\xb7  " << model;
     if (total_reqs > 0) {
@@ -1569,10 +1824,23 @@ int run_serve_profile(const ServeProfileOptions& opts) {
         std::cerr << "Server log found at " << server_log_path->string()
                   << " but no per-request DEBUG timing lines were parsed.\n"
                   << "  Restart the server with VLLM_LOGGING_LEVEL=DEBUG and capture stdout/stderr to a file.\n";
+        if (listener_log_info.pid > 0) {
+          if (!listener_log_info.vllm_logging_level.has_value()) {
+            std::cerr << "  Listener PID " << listener_log_info.pid
+                      << " has no VLLM_LOGGING_LEVEL in its environment.\n";
+          } else {
+            std::cerr << "  Listener PID " << listener_log_info.pid
+                      << " uses VLLM_LOGGING_LEVEL="
+                      << *listener_log_info.vllm_logging_level << ".\n";
+          }
+        }
       }
       if (trace_correlation.method == ServerTraceMatchMethod::ID) {
         std::cerr << "Matched " << trace_correlation.matched_requests << "/"
                   << trace_correlation.total_requests << " requests by ID\n";
+        if (refine_order_matched_v1_timing(traces, trace_correlation, server_timing_means)) {
+          trace_correlation.metric_assisted = true;
+        }
       } else if (trace_correlation.method == ServerTraceMatchMethod::TIMESTAMP) {
         std::cerr << "ID matching failed. Matched " << trace_correlation.matched_requests << "/"
                   << trace_correlation.total_requests << " requests by timestamp (+/-"
@@ -1745,7 +2013,7 @@ int run_serve_profile(const ServeProfileOptions& opts) {
   ci.median_prompt_tokens = median_prompt;
   ci.median_output_tokens = median_output;
   ci.request_rate = traces.empty() ? 0 :
-      static_cast<double>(traces.size()) / (opts.duration_seconds > 0 ? opts.duration_seconds : 1);
+      static_cast<double>(traces.size()) / profile_duration_seconds;
   ci.median_decode_latency_us = percentile_vec(decode_lat, 50) * 1000.0;
   ci.p99_decode_latency_us = percentile_vec(decode_lat, 99) * 1000.0;
 
@@ -1756,8 +2024,8 @@ int run_serve_profile(const ServeProfileOptions& opts) {
   di.profile = profile;
   di.total_gpus = gpu.count;
   di.network_bandwidth_gbps = 100.0;  // assume NVLink or fast network
-  if (!server_prefill_lat.empty()) {
-    di.measured_prefill_p99_ms = percentile_vec(server_prefill_lat, 99);
+  if (!prefill_lat.empty()) {
+    di.measured_prefill_p99_ms = percentile_vec(prefill_lat, 99);
   }
   if (median_prompt > 0.0) {
     const int64_t kv_bytes_per_token = detect_kv_bytes_per_token(model);
@@ -1808,7 +2076,9 @@ int run_serve_profile(const ServeProfileOptions& opts) {
   save_kv(analysis, "meta", "engine", opts.engine);
   save_kv(analysis, "meta", "gpu_name", gpu.name);
   save_kv(analysis, "meta", "gpu_count", gpu.count);
-  save_kv(analysis, "meta", "duration_seconds", static_cast<double>(opts.duration_seconds));
+  save_kv(analysis, "meta", "duration_seconds", profile_duration_seconds);
+  save_kv(analysis, "meta", "requested_duration_seconds",
+          static_cast<double>(opts.duration_seconds));
   save_kv(analysis, "meta", "total_requests", static_cast<int>(traces.size()));
   save_kv(analysis, "meta", "throughput_rps", ci.request_rate);
   save_kv(analysis, "meta", "prompt_tokens_estimated_any", prompt_tokens_estimated_any);
@@ -1921,7 +2191,8 @@ int run_serve_profile(const ServeProfileOptions& opts) {
   }
   std::cerr << "  Disagg: " << (disagg.should_disaggregate ? "recommended" : "not recommended")
             << " — " << disagg.reason << "\n";
-  std::cerr << "\nNote: TTFB (client) = time to first HTTP byte (headers); TTFT (server mean) = actual first token from Prometheus.\n";
+  std::cerr << "\nNote: TTFT (client) is measured from the first streamed token chunk.\n";
+  std::cerr << "      TTFT (server, mean) comes from the Prometheus histogram when available.\n";
   std::cerr << "      Queue/Prefill/Decode (server) require vLLM DEBUG logs.\n";
   std::cerr << "\nRun:  hotpath serve-report " << db_path.string() << "\n";
 

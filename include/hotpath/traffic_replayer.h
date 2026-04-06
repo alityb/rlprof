@@ -33,6 +33,7 @@ struct ReplayConfig {
     std::string endpoint = "http://localhost:8000";
     int max_concurrency = 16;
     double rate_limit_rps = 0.0;  // 0 = unlimited
+    int max_duration_seconds = 0;  // 0 = unlimited dispatch window
     std::string model;
     // Optional progress callback: called after every request completes.
     // Args: (done, total, ok_count, fail_count)

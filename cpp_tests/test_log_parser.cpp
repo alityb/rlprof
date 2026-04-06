@@ -243,6 +243,33 @@ int main() {
                 "order-correlated client trace should gain server timing");
   }
 
+  const std::vector<std::string> v1_exact_id_lines = {
+      "DEBUG 04-06 00:06:02 [entrypoints/logger.py:53] Request cmpl-hotpath-req-000001-0 details: prompt: 'demo prompt'",
+      "INFO 04-06 00:06:02 [v1/engine/async_llm.py:420] Added request cmpl-hotpath-req-000001-0-8fc9df2c.",
+      "DEBUG 04-06 00:06:03 [v1/engine/core.py:1170] EngineCore loop active.",
+      "DEBUG 04-06 00:06:03 [v1/worker/gpu_model_runner.py:3888] Running batch with cudagraph_mode: NONE, batch_descriptor: BatchDescriptor(num_tokens=103, num_reqs=None, uniform=False, has_lora=False, num_active_loras=0), should_ubatch: False, num_tokens_across_dp: None",
+      "DEBUG 04-06 00:06:03 [v1/worker/gpu_model_runner.py:3888] Running batch with cudagraph_mode: NONE, batch_descriptor: BatchDescriptor(num_tokens=1, num_reqs=None, uniform=False, has_lora=False, num_active_loras=0), should_ubatch: False, num_tokens_across_dp: None",
+      "DEBUG 04-06 00:06:04 [v1/worker/gpu_model_runner.py:3888] Running batch with cudagraph_mode: NONE, batch_descriptor: BatchDescriptor(num_tokens=1, num_reqs=None, uniform=False, has_lora=False, num_active_loras=0), should_ubatch: False, num_tokens_across_dp: None",
+      "DEBUG 04-06 00:06:05 [v1/engine/core.py:1158] EngineCore waiting for work.",
+  };
+  const auto v1_exact = hotpath::parse_vllm_log_lines_detailed(v1_exact_id_lines);
+  expect_true(v1_exact.traces.size() == 1,
+              "expected 1 exact-id v1 trace");
+  expect_true(v1_exact.traces[0].request_id == "cmpl-hotpath-req-000001",
+              "v1 exact-id trace should canonicalize hotpath request id");
+  expect_true(v1_exact.traces[0].server_timing_available,
+              "v1 exact-id trace should inherit anonymous batch timing");
+  expect_true(v1_exact.traces[0].queue_start_us > 0,
+              "v1 exact-id trace should keep queue timing");
+  expect_true(v1_exact.traces[0].prefill_start_us >= v1_exact.traces[0].queue_start_us,
+              "v1 exact-id trace should have sane prefill start");
+  expect_true(v1_exact.traces[0].prefill_end_us >= v1_exact.traces[0].prefill_start_us,
+              "v1 exact-id trace should have sane prefill end");
+  expect_true(v1_exact.traces[0].server_last_token_us >= v1_exact.traces[0].prefill_end_us,
+              "v1 exact-id trace should have sane decode timing");
+  expect_true(v1_exact.traces[0].prompt_tokens == 103,
+              "v1 exact-id trace should inherit prompt token count from batch descriptor");
+
   // ── CUDA graph capture lines must not produce traces ──
   // These appeared in real vLLM logs and were previously misidentified as request IDs.
   {

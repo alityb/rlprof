@@ -706,19 +706,13 @@ std::string render_serve_report(const ServeReportData& d) {
       << std::setw(9) << format_latency(p99) << "\n";
   };
 
-  if (d.server_timing_available && d.queue_wait_available) {
-    latency_row("Queue wait", d.queue_p50, d.queue_p90, d.queue_p99);
-    latency_row("Prefill (server)", d.server_prefill_p50, d.server_prefill_p90, d.server_prefill_p99);
-    if (d.server_decode_p50 > 0.0 || d.server_decode_p90 > 0.0 || d.server_decode_p99 > 0.0) {
-      latency_row("Decode (server)", d.server_decode_p50, d.server_decode_p90, d.server_decode_p99);
-    }
-  } else {
-    o << "Queue wait               not available (requires vLLM DEBUG logs and --server-log)\n";
+  latency_row("Queue wait", d.queue_p50, d.queue_p90, d.queue_p99);
+  latency_row("Prefill (server)", d.server_prefill_p50, d.server_prefill_p90, d.server_prefill_p99);
+  latency_row("Decode (server)", d.server_decode_p50, d.server_decode_p90, d.server_decode_p99);
+  if (!d.server_timing_available) {
+    o << "Server phase timing      not available (requires vLLM DEBUG logs and --server-log)\n";
   }
-  // "TTFB" (time to first byte) = time to first HTTP response header — includes network
-  // overhead before any token data. "TTFT (server)" from Prometheus histogram is the
-  // authoritative first-token latency when available.
-  latency_row("TTFB (client)", d.prefill_p50, d.prefill_p90, d.prefill_p99);
+  latency_row("TTFT (client)", d.prefill_p50, d.prefill_p90, d.prefill_p99);
   if (d.server_ttft_mean_ms > 0.0) {
     o << std::left << std::setw(24) << "TTFT (server, mean)"
       << std::right << std::setw(8) << format_latency(d.server_ttft_mean_ms)
@@ -726,7 +720,7 @@ std::string render_serve_report(const ServeReportData& d) {
       << std::setw(9) << "-" << "\n";
   }
   latency_row("Generation (client)", d.decode_total_p50, d.decode_total_p90, d.decode_total_p99);
-  latency_row("Decode (per-token)", d.decode_per_token_p50, d.decode_per_token_p90, d.decode_per_token_p99);
+  latency_row("Decode/token (client)", d.decode_per_token_p50, d.decode_per_token_p90, d.decode_per_token_p99);
   latency_row("End-to-end", d.e2e_p50, d.e2e_p90, d.e2e_p99);
   if (d.server_timing_available &&
       d.server_timing_match_method == "timestamp" &&
@@ -739,6 +733,11 @@ std::string render_serve_report(const ServeReportData& d) {
       o << " and refined with Prometheus queue, prefill, and decode means";
     }
     o << "\n";
+  } else if (d.server_timing_available &&
+             d.server_timing_match_method == "id" &&
+             d.server_timing_metric_assisted) {
+    o << "Note: Server timing matched by request ID and refined with Prometheus queue, "
+         "prefill, and decode means where vLLM v1 DEBUG timestamps were second-resolution\n";
   }
 
   if (gpu_phase_available) {
@@ -810,11 +809,11 @@ std::string render_serve_report(const ServeReportData& d) {
     o << std::left << std::setw(24) << "Projected throughput:"
       << "+" << std::lround(d.projected_throughput_pct) << "% ("
       << std::setprecision(1) << d.projected_throughput_rps << " req/s)\n";
-    // mono side: use measured server prefill p99 when available, otherwise fall back to model estimate
-    const double mono_ttft_display = (d.server_timing_available && d.server_prefill_p99 > 0.0)
-        ? d.server_prefill_p99 : d.mono_p99_ttft;
-    const std::string mono_ttft_suffix = (d.server_timing_available && d.server_prefill_p99 > 0.0)
-        ? "ms (measured)" : "ms (est.)";
+    const bool measured_client_ttft_available = d.prefill_p99 >= 0.0;
+    const double mono_ttft_display =
+        measured_client_ttft_available ? d.prefill_p99 : d.mono_p99_ttft;
+    const std::string mono_ttft_suffix =
+        measured_client_ttft_available ? "ms (measured client)" : "ms (est.)";
     o << std::left << std::setw(24) << "Projected p99 TTFT:"
       << std::lround(mono_ttft_display) << mono_ttft_suffix << " -> "
       << std::lround(d.disagg_p99_ttft) << "ms (est.)\n";

@@ -425,11 +425,67 @@ std::vector<RequestTrace> parse_vllm_v1_anonymous_traces(const std::vector<std::
   return traces;
 }
 
+void merge_v1_anonymous_timing(std::map<std::string, RequestTrace>& traces,
+                               const std::vector<std::string>& request_order,
+                               const std::vector<RequestTrace>& anonymous_traces) {
+  if (request_order.empty() || anonymous_traces.empty()) {
+    return;
+  }
+
+  std::size_t anonymous_index = 0;
+  for (const auto& request_id : request_order) {
+    auto it = traces.find(request_id);
+    if (it == traces.end()) {
+      continue;
+    }
+    auto& trace = it->second;
+    if (trace.server_timing_available) {
+      continue;
+    }
+    if (anonymous_index >= anonymous_traces.size()) {
+      break;
+    }
+
+    const auto& anonymous = anonymous_traces[anonymous_index++];
+    if (trace.queue_start_us <= 0) {
+      trace.queue_start_us = anonymous.queue_start_us;
+    }
+    if (trace.prefill_start_us <= 0) {
+      trace.prefill_start_us = anonymous.prefill_start_us;
+    }
+    if (trace.prefill_end_us <= 0) {
+      trace.prefill_end_us = anonymous.prefill_end_us;
+    }
+    if (trace.first_token_us <= 0) {
+      trace.first_token_us = anonymous.first_token_us;
+    }
+    if (trace.server_last_token_us <= 0) {
+      trace.server_last_token_us = anonymous.server_last_token_us;
+    }
+    if (trace.prompt_tokens <= 0) {
+      trace.prompt_tokens = anonymous.prompt_tokens;
+    }
+    if (trace.output_tokens <= 0) {
+      trace.output_tokens = anonymous.output_tokens;
+    }
+    if (trace.events.empty()) {
+      trace.events = anonymous.events;
+    } else {
+      trace.events.insert(trace.events.end(), anonymous.events.begin(), anonymous.events.end());
+    }
+
+    trace.server_timing_available =
+        timing_available_and_sane(trace) &&
+        trace.server_last_token_us >= trace.prefill_end_us;
+  }
+}
+
 }  // namespace
 
 VllmLogParseResult parse_vllm_log_lines_detailed(const std::vector<std::string>& lines) {
   std::map<std::string, RequestTrace> traces;
   std::optional<double> aggregate_cache_hit_rate;
+  std::vector<std::string> request_order;
 
   for (const auto& line : lines) {
     if (const auto rate = extract_aggregate_cache_hit_rate(line); rate.has_value()) {
@@ -446,6 +502,10 @@ VllmLogParseResult parse_vllm_log_lines_detailed(const std::vector<std::string>&
         line.find("add_request") != std::string::npos) {
       for (const auto& request_id : request_ids) {
         auto& trace = ensure_trace(traces, request_id);
+        if (std::find(request_order.begin(), request_order.end(), request_id) ==
+            request_order.end()) {
+          request_order.push_back(request_id);
+        }
         trace.arrival_us = ts;
         trace.queue_start_us = ts;
         trace.events.push_back(RequestEvent{
@@ -564,6 +624,17 @@ VllmLogParseResult parse_vllm_log_lines_detailed(const std::vector<std::string>&
     }
   }
 
+  const bool looks_like_v1 = std::any_of(lines.begin(), lines.end(), [](const std::string& line) {
+    return line_has_v1_request_boundary(line) || line_has_v1_batch_descriptor(line);
+  });
+  std::vector<RequestTrace> anonymous_v1_traces;
+  if (looks_like_v1) {
+    anonymous_v1_traces = parse_vllm_v1_anonymous_traces(lines);
+    if (!traces.empty()) {
+      merge_v1_anonymous_timing(traces, request_order, anonymous_v1_traces);
+    }
+  }
+
   std::vector<RequestTrace> result;
   result.reserve(traces.size());
   for (auto& [id, trace] : traces) {
@@ -577,13 +648,8 @@ VllmLogParseResult parse_vllm_log_lines_detailed(const std::vector<std::string>&
     result.push_back(std::move(trace));
   }
 
-  if (result.empty()) {
-    const bool looks_like_v1 = std::any_of(lines.begin(), lines.end(), [](const std::string& line) {
-      return line_has_v1_request_boundary(line) || line_has_v1_batch_descriptor(line);
-    });
-    if (looks_like_v1) {
-      result = parse_vllm_v1_anonymous_traces(lines);
-    }
+  if (result.empty() && looks_like_v1) {
+    result = std::move(anonymous_v1_traces);
   }
 
   return VllmLogParseResult{

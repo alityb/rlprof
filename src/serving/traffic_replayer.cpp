@@ -3,9 +3,12 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
@@ -292,9 +295,18 @@ std::string run_cmd(const std::string& cmd) {
   return out;
 }
 
-std::string response_body_without_timing(const std::string& output) {
-  auto timing_pos = output.rfind("__TIMING__:");
-  return timing_pos == std::string::npos ? output : output.substr(0, timing_pos);
+std::string trim_copy(std::string value) {
+  while (!value.empty() && (value.back() == '\n' || value.back() == '\r' ||
+                            value.back() == ' ' || value.back() == '\t')) {
+    value.pop_back();
+  }
+  std::size_t start = 0;
+  while (start < value.size() &&
+         (value[start] == ' ' || value[start] == '\t' ||
+          value[start] == '\n' || value[start] == '\r')) {
+    ++start;
+  }
+  return value.substr(start);
 }
 
 // Count "data:" SSE chunks in streaming response (each is one token)
@@ -307,6 +319,122 @@ int count_sse_tokens(const std::string& body) {
   }
   // Subtract 1 for the final "data: [DONE]" marker
   return (count > 1) ? count - 1 : count;
+}
+
+bool sse_payload_has_generated_content(const std::string& payload) {
+  const std::string trimmed = trim_copy(payload);
+  if (trimmed.empty() || trimmed == "[DONE]") {
+    return false;
+  }
+  const std::string text = extract_json_string(trimmed, "text");
+  if (!text.empty()) {
+    return true;
+  }
+  const std::string content = extract_json_string(trimmed, "content");
+  if (!content.empty()) {
+    return true;
+  }
+  const std::string reasoning = extract_json_string(trimmed, "reasoning_content");
+  return !reasoning.empty();
+}
+
+ReplayResult replay_one_request(const ReplayRequest& req,
+                                const ReplayConfig& config,
+                                std::size_t index) {
+  ReplayResult result;
+  result.external_request_id = make_external_request_id(index);
+  result.request_id = expected_openai_request_id(req, result.external_request_id);
+
+  const std::string body = build_request_body(req, config.model);
+
+  const std::string tmp_path = "/tmp/hotpath_req_" + std::to_string(index) + ".json";
+  {
+    std::ofstream f(tmp_path);
+    if (!f.is_open()) {
+      result.success = false;
+      result.error = "failed to open temp file: " + tmp_path;
+      return result;
+    }
+    f << body;
+    if (!f.good()) {
+      result.success = false;
+      result.error = "failed to write temp file: " + tmp_path + " (disk full?)";
+      std::remove(tmp_path.c_str());
+      return result;
+    }
+  }
+
+  const std::string api_path = api_path_for(req);
+  const std::string curl_cmd =
+      "curl -sS -N -X POST "
+      "-H 'Content-Type: application/json' "
+      "-H 'X-Request-Id: " + result.external_request_id + "' "
+      "-d @" + tmp_path + " "
+      "'" + config.endpoint + api_path + "'";
+
+  result.send_us = now_us();
+  std::string output;
+  std::string pending;
+  std::array<char, 4096> buffer{};
+  FILE* pipe = popen((curl_cmd + " 2>/dev/null").c_str(), "r");
+  if (pipe == nullptr) {
+    result.success = false;
+    result.error = "failed to run curl";
+    std::remove(tmp_path.c_str());
+    return result;
+  }
+
+  while (true) {
+    const std::size_t n = std::fread(buffer.data(), 1, buffer.size(), pipe);
+    if (n > 0) {
+      output.append(buffer.data(), n);
+      pending.append(buffer.data(), n);
+      for (;;) {
+        const std::size_t newline = pending.find('\n');
+        if (newline == std::string::npos) {
+          break;
+        }
+        std::string line = pending.substr(0, newline);
+        pending.erase(0, newline + 1);
+        if (!line.empty() && line.back() == '\r') {
+          line.pop_back();
+        }
+        if (result.first_token_us == 0 && line.rfind("data:", 0) == 0) {
+          if (sse_payload_has_generated_content(line.substr(5))) {
+            result.first_token_us = now_us();
+          }
+        }
+      }
+    }
+    if (n < buffer.size()) {
+      if (std::feof(pipe) || std::ferror(pipe)) {
+        break;
+      }
+    }
+  }
+  const int rc = pclose(pipe);
+  const int64_t done_us = now_us();
+  result.completion_us = done_us;
+
+  const std::string response_body = output;
+  const std::string response_id = extract_response_id(response_body);
+  if (!response_id.empty()) {
+    result.request_id = response_id;
+  }
+  result.prompt_tokens = extract_usage_int(response_body, "prompt_tokens", 0);
+  result.completion_tokens = extract_usage_int(response_body, "completion_tokens", 0);
+  result.prompt_tokens_estimated = result.prompt_tokens <= 0;
+  result.tokens_generated =
+      result.completion_tokens > 0 ? result.completion_tokens : count_sse_tokens(response_body);
+  result.success =
+      rc == 0 && !response_body.empty() && response_body.find("\"error\"") == std::string::npos;
+
+  if (!result.success) {
+    result.error = response_body.empty() ? "curl request failed" : response_body.substr(0, 200);
+  }
+
+  std::remove(tmp_path.c_str());
+  return result;
 }
 
 }  // namespace
@@ -346,118 +474,102 @@ std::string parse_model_from_models_response(const std::string& response) {
 
 std::vector<ReplayResult> replay_traffic(const std::vector<ReplayRequest>& requests,
                                          const ReplayConfig& config) {
-  std::vector<ReplayResult> results;
-  results.reserve(requests.size());
-
   const double interval_us = (config.rate_limit_rps > 0)
       ? 1e6 / config.rate_limit_rps
       : 0.0;
+  const int max_concurrency = std::max(1, config.max_concurrency);
+  const int64_t dispatch_deadline_us =
+      config.max_duration_seconds > 0
+          ? now_us() + static_cast<int64_t>(config.max_duration_seconds) * 1000000LL
+          : 0;
+
+  struct InFlightRequest {
+    std::size_t index = 0;
+    std::future<ReplayResult> future;
+  };
+
+  std::vector<std::optional<ReplayResult>> results_by_index(requests.size());
+  std::vector<InFlightRequest> in_flight;
+  in_flight.reserve(static_cast<std::size_t>(max_concurrency));
 
   int req_ok = 0, req_fail = 0;
+  int done = 0;
   const int total = static_cast<int>(requests.size());
-  for (size_t i = 0; i < requests.size(); ++i) {
-    const auto& req = requests[i];
-    ReplayResult result;
-    result.external_request_id = make_external_request_id(i);
-    result.request_id = expected_openai_request_id(req, result.external_request_id);
+  std::size_t next_request = 0;
+  int64_t next_dispatch_us = now_us();
 
-    const std::string body = build_request_body(req, config.model);
-
-    // Write body to a temp file to avoid shell escaping issues
-    const std::string tmp_path = "/tmp/hotpath_req_" + std::to_string(i) + ".json";
-    {
-      std::ofstream f(tmp_path);
-      if (!f.is_open()) {
-        result.success = false;
-        result.error = "failed to open temp file: " + tmp_path;
-        results.push_back(std::move(result));
+  auto collect_finished = [&](bool wait_for_one) {
+    bool collected = false;
+    for (std::size_t i = 0; i < in_flight.size();) {
+      const auto status = in_flight[i].future.wait_for(
+          wait_for_one && !collected ? std::chrono::milliseconds(50)
+                                     : std::chrono::milliseconds(0));
+      if (status != std::future_status::ready) {
+        ++i;
         continue;
       }
-      f << body;
-      if (!f.good()) {
-        result.success = false;
-        result.error = "failed to write temp file: " + tmp_path + " (disk full?)";
-        std::remove(tmp_path.c_str());
-        results.push_back(std::move(result));
-        continue;
+
+      ReplayResult result = in_flight[i].future.get();
+      if (result.success) {
+        ++req_ok;
+      } else {
+        ++req_fail;
       }
+      ++done;
+      results_by_index[in_flight[i].index] = std::move(result);
+      if (config.on_request_done) {
+        config.on_request_done(done, total, req_ok, req_fail);
+      }
+      in_flight.erase(in_flight.begin() + static_cast<std::ptrdiff_t>(i));
+      collected = true;
     }
+    return collected;
+  };
 
-    // Use curl with streaming (-N) — chat or plain completions based on request format
-    const std::string api_path = api_path_for(req);
-    const std::string curl_cmd =
-        "curl -sS -N -X POST "
-        "-H 'Content-Type: application/json' "
-        "-H 'X-Request-Id: " + result.external_request_id + "' "
-        "-d @" + tmp_path + " "
-        "-w '\\n__TIMING__:%{time_starttransfer}:%{time_total}' "
-        "'" + config.endpoint + api_path + "'";
-
-    result.send_us = now_us();
-
-    const std::string output = run_cmd(curl_cmd);
-
-    const int64_t done_us = now_us();
-
-    // Parse timing from curl -w output
-    auto timing_pos = output.rfind("__TIMING__:");
-    const std::string response_body = response_body_without_timing(output);
-    const std::string response_id = extract_response_id(response_body);
-    if (!response_id.empty()) {
-      result.request_id = response_id;
-    }
-    result.prompt_tokens = extract_usage_int(response_body, "prompt_tokens", 0);
-    result.completion_tokens = extract_usage_int(response_body, "completion_tokens", 0);
-    result.prompt_tokens_estimated = result.prompt_tokens <= 0;
-    if (timing_pos != std::string::npos) {
-      const std::string timing = output.substr(timing_pos + 11);
-      auto colon = timing.find(':');
-      if (colon != std::string::npos) {
-        try {
-          double ttfb_s = std::stod(timing.substr(0, colon));
-          double total_s = std::stod(timing.substr(colon + 1));
-          result.first_token_us = result.send_us + static_cast<int64_t>(ttfb_s * 1e6);
-          result.completion_us = result.send_us + static_cast<int64_t>(total_s * 1e6);
-        } catch (...) {
-          result.completion_us = done_us;
+  while (next_request < requests.size() || !in_flight.empty()) {
+    while (next_request < requests.size() &&
+           static_cast<int>(in_flight.size()) < max_concurrency) {
+      if (dispatch_deadline_us > 0 && now_us() >= dispatch_deadline_us) {
+        next_request = requests.size();
+        break;
+      }
+      if (interval_us > 0) {
+        const int64_t sleep_us = next_dispatch_us - now_us();
+        if (sleep_us > 0) {
+          std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
+        }
+        if (dispatch_deadline_us > 0 && now_us() >= dispatch_deadline_us) {
+          next_request = requests.size();
+          break;
         }
       }
-      // Use response usage if available; otherwise estimate from SSE data chunks.
-      result.tokens_generated =
-          result.completion_tokens > 0 ? result.completion_tokens : count_sse_tokens(response_body);
-      result.success = !response_body.empty() && response_body.find("\"error\"") == std::string::npos;
-    } else {
-      result.completion_us = done_us;
-      result.success = !output.empty() && output.find("\"error\"") == std::string::npos;
-      result.tokens_generated =
-          result.completion_tokens > 0 ? result.completion_tokens : count_sse_tokens(output);
-    }
 
-    if (result.success) ++req_ok; else ++req_fail;
-
-    if (!result.success) {
-      result.error = output.substr(0, 200);
-    }
-
-    results.push_back(std::move(result));
-
-    if (config.on_request_done) {
-      config.on_request_done(static_cast<int>(i) + 1, total, req_ok, req_fail);
-    }
-
-    // Remove temp file
-    std::remove(tmp_path.c_str());
-
-    // Rate limiting
-    if (interval_us > 0 && i + 1 < requests.size()) {
-      const int64_t elapsed = now_us() - result.send_us;
-      const int64_t sleep_us = static_cast<int64_t>(interval_us) - elapsed;
-      if (sleep_us > 0) {
-        std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
+      const std::size_t index = next_request++;
+      in_flight.push_back(InFlightRequest{
+          .index = index,
+          .future = std::async(
+              std::launch::async,
+              [&, index]() { return replay_one_request(requests[index], config, index); }),
+      });
+      if (interval_us > 0) {
+        const int64_t scheduled_next =
+            next_dispatch_us + static_cast<int64_t>(interval_us);
+        next_dispatch_us = std::max(scheduled_next, now_us());
       }
+    }
+
+    if (!collect_finished(next_request >= requests.size())) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
   }
 
+  std::vector<ReplayResult> results;
+  results.reserve(done);
+  for (auto& result : results_by_index) {
+    if (result.has_value()) {
+      results.push_back(std::move(*result));
+    }
+  }
   return results;
 }
 

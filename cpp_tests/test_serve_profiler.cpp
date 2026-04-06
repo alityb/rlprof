@@ -34,7 +34,7 @@ int main() {
   fs::current_path(temp_root);
 
   hotpath::ServeProfileOptions opts;
-  opts.endpoint = "http://localhost:8000";
+  opts.endpoint = "http://localhost:18000";
   opts.engine = "vllm";
   opts.output = ".hotpath/serve_run";
 
@@ -51,11 +51,37 @@ int main() {
       discovered->lexically_normal() == newer.lexically_normal(),
       "expected newest candidate log to be selected");
 
+  setenv("HOTPATH_TEST_LISTENER_PID", "12345", 1);
+  const fs::path matching_log = ".hotpath/video-server/vllm.stdout.log";
+  const fs::path stderr_log = ".hotpath/video-server/vllm.stderr.log";
+  write_text(matching_log, "stdout log\n");
+  write_text(stderr_log, "stderr log\n");
+  fs::last_write_time(matching_log, fs::file_time_type::clock::now() - std::chrono::seconds(2));
+  fs::last_write_time(stderr_log, fs::file_time_type::clock::now() + std::chrono::seconds(2));
+  setenv("HOTPATH_TEST_STDOUT_LOG_PATH", matching_log.c_str(), 1);
+  setenv("HOTPATH_TEST_STDERR_LOG_PATH", stderr_log.c_str(), 1);
+
+  const auto pid_filtered = hotpath::discover_server_log_path(opts);
+  expect_true(pid_filtered.has_value(), "expected log autodiscovery with listener-backed stdout");
+  expect_true(
+      pid_filtered->lexically_normal() == matching_log.lexically_normal(),
+      "expected autodiscovery to prefer the live listener stdout log");
+
+  unsetenv("HOTPATH_TEST_STDOUT_LOG_PATH");
+  unsetenv("HOTPATH_TEST_STDERR_LOG_PATH");
+  const auto none_matching = hotpath::discover_server_log_path(opts);
+  expect_true(
+      !none_matching.has_value(),
+      "expected no autodiscovery when the live listener is not writing logs to a regular file");
+  unsetenv("HOTPATH_TEST_LISTENER_PID");
+
+  fs::remove_all(".hotpath");
+
   hotpath::ServeProfileOptions custom_opts = opts;
   custom_opts.output = "artifacts/run";
   const fs::path custom_log = "artifacts/video-server/vllm.stderr.log";
   write_text(custom_log, "custom log\n");
-  fs::last_write_time(custom_log, fs::file_time_type::clock::now() + std::chrono::seconds(1));
+  fs::last_write_time(custom_log, fs::file_time_type::clock::now() + std::chrono::seconds(10));
   const auto custom_discovered = hotpath::discover_server_log_path(custom_opts);
   expect_true(custom_discovered.has_value(), "expected custom output parent log autodiscovery");
   expect_true(

@@ -54,12 +54,12 @@ DisaggEstimate estimate_disaggregation(const DisaggModelInput& input) {
   const auto mono = mg1_estimate(mono_service_ms, gpus, prof.request_rate);
   const double blocking_factor = 1.0 / (1.0 + prof.prefill_contention * 0.3);
   est.mono_throughput_rps = mono.throughput_rps * blocking_factor;
-  // Use measured server prefill p99 when available — it already includes real
-  // scheduling contention and is more accurate than the token-count model.
-  // The queue throughput model still uses prefill_time_ms (a median proxy),
-  // since p99 is too pessimistic as a service-time input to M/G/1.
-  // Use measured p99 when >= 0 (sentinel is -1.0; 0.0 is a valid measurement
-  // e.g. fully cached workloads where prefill is near-instant).
+  // Use measured p99 TTFT when available. It already includes real
+  // scheduling effects and is more accurate than the token-count model for
+  // the mono/disagg TTFT outputs. The queue throughput model still uses
+  // prefill_time_ms (a median proxy), since p99 is too pessimistic as a
+  // service-time input to M/G/1. Use measured p99 when >= 0 (sentinel is
+  // -1.0; 0.0 is a valid measurement for near-instant first token).
   est.mono_p99_ttft_ms = (input.measured_prefill_p99_ms >= 0.0)
       ? input.measured_prefill_p99_ms
       : prefill_time_ms * (1.0 + prof.prefill_contention);
@@ -121,9 +121,9 @@ DisaggEstimate estimate_disaggregation(const DisaggModelInput& input) {
   est.optimal_prefill_gpus = best_p;
   est.optimal_decode_gpus = best_d;
   est.disagg_throughput_rps = best_throughput;
-  // disagg prefill = measured mono prefill when available (conservative upper bound;
-  // disagg removes head-of-line blocking so real value could be lower, but we
-  // don't have a measurement of that).  Falls back to the token-count model.
+  // Disagg TTFT starts from the measured mono TTFT when available
+  // (conservative upper bound; disagg removes head-of-line blocking so the
+  // real value could be lower). Falls back to the token-count model.
   const double disagg_prefill_base = (input.measured_prefill_p99_ms >= 0.0)
       ? input.measured_prefill_p99_ms
       : prefill_time_ms;

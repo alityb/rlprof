@@ -73,7 +73,7 @@ int main() {
   expect_true(contains(report, "KV Cache"), "missing KV Cache section");
   expect_true(contains(report, "Disaggregation"), "missing Disaggregation section");
   expect_true(contains(report, "Prefix Sharing"), "missing Prefix Sharing section");
-  expect_true(contains(report, "TTFB (client)"), "missing TTFB label");
+  expect_true(contains(report, "TTFT (client)"), "missing TTFT client label");
   expect_true(contains(report, "Generation (client)"), "missing generation label");
   expect_true(contains(report, "Queue wait"), "queue wait should be rendered");
   expect_true(contains(report, "Prefill (server)"), "missing server prefill label");
@@ -88,8 +88,8 @@ int main() {
   expect_true(contains(report, "meta-llama"), "missing model name");
 
   // TTFT in disagg section: mono side measured, disagg side estimated
-  expect_true(contains(report, "ms (measured)"),
-              "disagg TTFT: mono side should be labeled (measured) when server_timing_available");
+  expect_true(contains(report, "ms (measured client)"),
+              "disagg TTFT: mono side should be labeled (measured client) when TTFT is measured");
   expect_true(contains(report, "ms (est.)"),
               "disagg TTFT: disagg side should be labeled (est.)");
 
@@ -168,11 +168,11 @@ int main() {
                 "server_ttft_mean_ms > 0 should add TTFT (server, mean) row");
     expect_true(contains(ttft_report, "13.7"),
                 "server TTFT value 13.7 should appear in report");
-    expect_true(contains(ttft_report, "TTFB (client)"),
-                "TTFB (client) row should always be present");
+    expect_true(contains(ttft_report, "TTFT (client)"),
+                "TTFT (client) row should always be present");
     // The two measurements should both appear and show the difference
     expect_true(contains(ttft_report, "4.2"),
-                "TTFB client value 4.2 should appear in report");
+                "TTFT client value 4.2 should appear in report");
   }
 
   {
@@ -213,8 +213,8 @@ int main() {
     const std::string no_ttft_report = hotpath::render_serve_report(no_ttft);
     expect_true(!contains(no_ttft_report, "TTFT (server, mean)"),
                 "server_ttft_mean_ms = -1 should NOT show TTFT (server, mean) row");
-    expect_true(contains(no_ttft_report, "TTFB (client)"),
-                "TTFB (client) row must always be present");
+    expect_true(contains(no_ttft_report, "TTFT (client)"),
+                "TTFT (client) row must always be present");
   }
 
   std::cerr << "test_serve_report: all tests passed\n";

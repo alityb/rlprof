@@ -15,10 +15,10 @@ struct DisaggModelInput {
     // may be lower than intra-node NVLink.  Set to 0 for single-node.
     int num_nodes = 1;
     double cross_node_bandwidth_gbps = 0.0;  // 0 = same as network_bandwidth_gbps
-    // Measured server-side prefill p99 (ms). When > 0, overrides the rough
-    // median_prompt_tokens * 0.01ms/token estimate for mono/disagg TTFT output.
-    // The queue throughput model still uses the token-count estimate since p99
-    // is not representative of average service time.
+    // Measured p99 time-to-first-token (ms). When >= 0, overrides the rough
+    // token-count TTFT estimate for mono/disagg TTFT output. The queue
+    // throughput model still uses the token-count estimate since p99 is not
+    // representative of average service time.
     double measured_prefill_p99_ms = -1.0;
 };
 

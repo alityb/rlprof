@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.3.0 - 2026-04-06
+
+Serving timing, log discovery, and report accuracy hardening.
+
+Highlights:
+
+- `serve-profile` now honors configured concurrency, stops dispatching new requests when the requested duration window closes, and measures client TTFT from the first streamed token chunk instead of HTTP first-byte timing
+- local vLLM DEBUG log autodiscovery now resolves the actual live listener stdout and stderr file paths from `/proc/<pid>/fd/*`, which prevents stale `.hotpath/video-server/*` files from being mistaken for the active server log
+- `serve-report` now treats missing latency as unavailable instead of rendering fake `0.0 ms`, uses `TTFT (client)` consistently, and explicitly discloses when vLLM v1 server timings are refined from Prometheus because the raw DEBUG timestamps are only second-resolution
+- vLLM v1 parsing now merges exact request IDs from `Added request ...` lines with anonymous `Running batch ... BatchDescriptor(...)` execution lines, which allows exact-ID-matched requests to retain server queue, prefill, and decode timing
+- live dashboard redraw was hardened for Ghostty-style terminals so `serve-profile` updates in place instead of stacking duplicate frames
+
 ## v0.2.9 - 2026-04-05
 
 serve-profile timing correlation and startup hardening.
