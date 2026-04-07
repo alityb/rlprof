@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.3.9 - 2026-04-07
+
+Fix p99 column clipping on narrow terminals.
+
 ## v0.3.8 - 2026-04-06
 
 Remove batch size graph from serve-report.

@@ -187,11 +187,11 @@ def render(db_path: str) -> int:
     # k9s-style: dim label column, p50 dimmer → p90 normal → p99 bold+colored
     lat = Table(show_header=True, box=None, padding=(0, 1), show_edge=False,
                 header_style=BK)
-    lat.add_column("",     no_wrap=True, min_width=22, style=BK)
-    lat.add_column("p50",  justify="right", no_wrap=True, min_width=10)
-    lat.add_column("p90",  justify="right", no_wrap=True, min_width=10)
-    lat.add_column("p99 ▴", justify="right", no_wrap=True, min_width=11,
-                   header_style="bold " + BK)  # ▴ flags it as the critical column
+    lat.add_column("",      no_wrap=True, min_width=18, style=BK)
+    lat.add_column("p50",   justify="right", no_wrap=True, min_width=9)
+    lat.add_column("p90",   justify="right", no_wrap=True, min_width=9)
+    lat.add_column("p99 ▴", justify="right", no_wrap=True, min_width=9,
+                   header_style="bold " + BK)
 
     def _row(label, p50, p90, p99, em=False, warn=200., crit=600.):
         if p50 < 0 and p99 < 0: return
